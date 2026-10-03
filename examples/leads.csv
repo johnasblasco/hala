@@ -1,0 +1,4 @@
+name,email,website,category,city,reviews,rating,runs_ads,contact_name,language
+Bright Smile Dental,hello@brightsmile.example,https://brightsmile.example,Dentist,Quezon City,214,4.8,yes,Dr. Reyes,English
+Mang Jose Plumbing,jose@plumbing.example,http://mangjose.example,Plumber,Makati,58,4.5,no,,Filipino
+Corner Cafe,,https://cornercafe.example,Cafe,Pasig,40,4.1,no,,English
