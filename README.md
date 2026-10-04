@@ -7,6 +7,37 @@ outreach copy.
 It's modelled on the "sold 200 websites in 12 months" playbook, with its weak
 spots fixed. See **[STRATEGY.md](STRATEGY.md)** for the reasoning.
 
+## The web app (easiest)
+
+```bash
+pip install -e .
+hala serve
+```
+
+Your browser opens at http://localhost:8000. From there you can:
+
+- **Find leads**: pick a business type and towns, then click *Find leads*. Hala searches, finds emails, audits websites and writes the outreach.
+- **Leads**: work through them best-first. Open one to see its audit, edit and copy the email (or open it straight in Gmail), and track its status: New → Contacted → Replied → Meeting → Won/Lost.
+- **Dashboard**: shows your pipeline and which pitch angles get replies.
+- **Quick audit**: check any single website.
+- **Settings**: your sender details, the public report URL, and optional Google and Anthropic keys.
+
+Your data lives in `~/.hala/hala.db` (on Windows, `C:\Users\<you>\.hala\hala.db`).
+
+### Changing the web app
+
+The built UI is committed in `hala/static/`, so you don't need Node.js just to
+run it. To change it:
+
+```bash
+cd web
+npm install
+npm run dev      # http://localhost:5173, live reload (keep `hala serve` running too)
+npm run build    # writes the production build into hala/static/
+```
+
+## Command line
+
 ## Quick start
 
 ```bash

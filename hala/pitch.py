@@ -113,10 +113,11 @@ def claude_pitch(lead: dict, audit: AuditResult, report_url: str, client=None) -
 
 
 def write_pitch(lead: dict, audit: AuditResult, report_url: str, sender: dict,
-                use_claude: bool = True) -> Pitch:
+                use_claude: bool = True, client=None) -> Pitch:
+    """Write the email. Pass `client` (an anthropic.Anthropic) to use a specific key."""
     pitch = None
-    if use_claude and _has_credentials():
-        pitch = claude_pitch(lead, audit, report_url)
+    if use_claude and (client is not None or _has_credentials()):
+        pitch = claude_pitch(lead, audit, report_url, client=client)
     pitch = pitch or template_pitch(lead, audit, report_url)
     pitch.body = f"{pitch.body.rstrip()}\n\n{compliance_footer(sender)}"
     return pitch

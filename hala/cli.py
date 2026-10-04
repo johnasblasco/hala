@@ -147,6 +147,12 @@ def cmd_find(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    from .server import serve
+    serve(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hala", description="Audit, qualify and pitch local business websites.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -178,6 +184,12 @@ def main(argv=None) -> int:
     f.add_argument("--report-base-url")
     f.add_argument("--no-ai", action="store_true")
     f.set_defaults(func=cmd_find)
+
+    sv = sub.add_parser("serve", help="open the Hala web app in your browser")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--no-browser", action="store_true")
+    sv.set_defaults(func=cmd_serve)
 
     args = ap.parse_args(argv)
     return args.func(args)
