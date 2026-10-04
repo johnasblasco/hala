@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from . import ai
 from . import find as finder
+from . import mailer
 from .audit import audit
 from .db import SECRET_KEYS, STATUSES, DatabaseUnavailable, Store
 from .pitch import no_website_message, write_pitch
@@ -185,6 +186,11 @@ class SettingsPatch(BaseModel):
     ai_provider: str | None = None
     ai_model: str | None = None
     ai_base_url: str | None = None
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_host: str | None = None
+    smtp_port: str | None = None
+    daily_send_limit: str | None = None
 
 
 # Key formats that have been stable for years. Catches browser-autofilled passwords.
@@ -364,6 +370,10 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         # Never send secrets back to the browser; only whether they are set.
         for k in SECRET_KEYS:
             s[k + "_set"] = bool(s.pop(k))
+        cfg = mailer.mail_config(store.get_settings())
+        s["email_sending"] = {"configured": cfg is not None,
+                              "limit": cfg["limit"] if cfg else mailer.DEFAULT_DAILY_LIMIT,
+                              "sent_last_24h": store.emails_sent_last_24h()}
         s["ai_providers"] = [{"id": pid, "label": p["label"], "default_model": p["model"],
                               "key_url": p["key_url"]} for pid, p in ai.PROVIDERS.items()]
         return s
@@ -372,6 +382,14 @@ def create_app(store: Store | None = None, local_base: str | None = None,
     def put_settings(patch: SettingsPatch):
         values = {k: v.strip() if isinstance(v, str) else v
                   for k, v in patch.model_dump(exclude_none=True).items()}
+        pw = values.get("smtp_password")
+        host = values.get("smtp_host", store.get_settings().get("smtp_host")) or mailer.GMAIL_HOST
+        if pw and host == mailer.GMAIL_HOST and not mailer.looks_like_gmail_app_password(pw):
+            raise HTTPException(400, "Gmail needs an App Password: 16 letters from Google Account → "
+                                     "Security → App passwords. Not your normal Gmail password "
+                                     "(did your browser autofill it?).")
+        if pw:
+            values["smtp_password"] = pw.replace(" ", "")
         for k, (prefix, label) in KEY_FORMATS.items():
             if values.get(k) and not values[k].startswith(prefix):
                 raise HTTPException(400, f"That doesn't look like a {label} (they start with "
@@ -413,6 +431,21 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         ok, message = ai.test_writer(writer)
         return {"ok": ok, "message": message, "provider": writer.name,
                 "model": getattr(writer, "model", "")}
+
+    @api.post("/settings/test-email")
+    def test_email():
+        """Send a test email to your own address."""
+        settings = store.get_settings()
+        cfg = mailer.mail_config(settings)
+        if cfg is None:
+            return {"ok": False, "message": "Add your Gmail address and App Password first."}
+        try:
+            mailer.send_email(cfg, cfg["user"], "Hala test email",
+                              "It works! Hala can send outreach emails from this address.",
+                              settings.get("sender_name", ""))
+        except mailer.MailError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "message": f"Sent a test email to {cfg['user']}. Check your inbox."}
 
     @api.delete("/settings/{key}")
     def clear_secret(key: str):
@@ -496,6 +529,29 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         settings = store.get_settings()
         process_site_lead(store, lead, settings, _writer(settings), local_base, force_pitch=True)
         return store.get_lead(lead_id)
+
+    @api.post("/leads/{lead_id}/send-email")
+    def send_lead_email(lead_id: int):
+        """Send this lead's saved email from your mailbox, within the daily limit."""
+        lead = store.get_lead(lead_id)
+        if not lead:
+            raise HTTPException(404, "lead not found")
+        settings = store.get_settings()
+        cfg = mailer.mail_config(settings)
+        if cfg is None:
+            raise HTTPException(400, "Email sending isn't set up. Add your Gmail in Settings.")
+        if not lead["email"]:
+            raise HTTPException(400, "This lead has no email address.")
+        sent = store.emails_sent_last_24h()
+        if sent >= cfg["limit"]:
+            raise HTTPException(429, f"Daily limit reached ({cfg['limit']} emails in 24 hours). "
+                                     "Sending more from one Gmail gets it flagged as spam. Try tomorrow.")
+        try:
+            mailer.send_email(cfg, lead["email"], lead["subject"], lead["body"],
+                              settings.get("sender_name", ""))
+        except mailer.MailError as e:
+            raise HTTPException(502, str(e))
+        return store.record_email_sent(lead_id)
 
     @api.post("/leads/{lead_id}/preview")
     def make_preview(lead_id: int, req: PreviewRequest):

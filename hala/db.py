@@ -64,6 +64,8 @@ LEAD_COLUMNS = [
     ("message", "TEXT NOT NULL DEFAULT ''"),
     ("status", "TEXT NOT NULL DEFAULT 'new'"),
     ("contacted_at", "TEXT NOT NULL DEFAULT ''"),
+    ("email_sent_at", "TEXT NOT NULL DEFAULT ''"),
+    ("emails_sent", "INTEGER NOT NULL DEFAULT 0"),
     ("notes", "TEXT NOT NULL DEFAULT ''"),
     ("search_query", "TEXT NOT NULL DEFAULT ''"),
     ("created_at", "TEXT NOT NULL DEFAULT ''"),
@@ -99,8 +101,9 @@ AI_KEY_SETTINGS = ("anthropic_api_key", "gemini_api_key", "groq_api_key", "openr
                    "openai_api_key", "custom_api_key")
 SETTING_KEYS = ("sender_name", "sender_company", "sender_email", "sender_address",
                 "report_base_url", "google_api_key", "use_ai", "ai_provider", "ai_model",
-                "ai_base_url", *AI_KEY_SETTINGS)
-SECRET_KEYS = ("google_api_key", *AI_KEY_SETTINGS)
+                "ai_base_url", *AI_KEY_SETTINGS,
+                "smtp_user", "smtp_password", "smtp_host", "smtp_port", "daily_send_limit")
+SECRET_KEYS = ("google_api_key", *AI_KEY_SETTINGS, "smtp_password")
 
 
 def _now() -> str:
@@ -376,6 +379,24 @@ class Store:
     def _follow_up_cutoff() -> str:
         return (datetime.now(timezone.utc) - timedelta(days=FOLLOW_UP_DAYS)).isoformat(timespec="seconds")
 
+    def record_email_sent(self, lead_id: int) -> dict | None:
+        """Note that an email went out; a New lead becomes Contacted."""
+        with self._tx() as run:
+            run(f"UPDATE {self.leads} SET email_sent_at = ?, emails_sent = emails_sent + 1, "
+                f"updated_at = ? WHERE id = ?", (_now(), _now(), lead_id))
+        lead = self.get_lead(lead_id)
+        if lead and lead["status"] == "new":
+            lead = self.update_lead(lead_id, {"status": "contacted"})
+        return lead
+
+    def emails_sent_last_24h(self) -> int:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+        with self._tx() as run:
+            # Counts leads emailed in the window; a resend within 24h counts once (good enough
+            # for a safety cap, and never lets a burst through).
+            r = run(f"SELECT COUNT(*) AS n FROM {self.leads} WHERE email_sent_at >= ?", (since,)).fetchone()
+        return int(r["n"] or 0)
+
     def delete_lead(self, lead_id: int) -> None:
         with self._tx() as run:
             run(f"DELETE FROM {self.leads} WHERE id = ?", (lead_id,))
@@ -485,6 +506,11 @@ class Store:
             "ai_provider": os.environ.get("HALA_AI_PROVIDER", ""),
             "ai_model": os.environ.get("HALA_AI_MODEL", ""),
             "ai_base_url": os.environ.get("HALA_AI_BASE_URL", ""),
+            "smtp_user": os.environ.get("HALA_SMTP_USER", ""),
+            "smtp_password": os.environ.get("HALA_SMTP_PASSWORD", ""),
+            "smtp_host": os.environ.get("HALA_SMTP_HOST", ""),
+            "smtp_port": os.environ.get("HALA_SMTP_PORT", ""),
+            "daily_send_limit": os.environ.get("HALA_DAILY_SEND_LIMIT", ""),
             "use_ai": "1",
         }
         out = {k: stored.get(k) or env.get(k, "") for k in SETTING_KEYS}

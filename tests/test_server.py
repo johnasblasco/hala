@@ -367,3 +367,45 @@ def test_parallel_cold_starts_dont_collide():
     fresh = Store(PG_URL)
     with fresh._tx() as run:
         assert "contacted_at" in fresh._columns(run, fresh.leads)
+
+
+def test_send_email_flow(client, store, monkeypatch):
+    from hala import mailer
+    sent = []
+    monkeypatch.setattr(mailer, "send_email", lambda cfg, to, subject, body, name="": sent.append((to, subject)) or "<id>")
+    lead_id = store.upsert_lead({"name": "A", "address": "1", "has_website": 1, "email": "owner@a.ph",
+                                 "subject": "hi", "body": "hello"})
+    r = client.post(f"/api/leads/{lead_id}/send-email")
+    assert r.status_code == 400 and "isn't set up" in r.json()["detail"]
+
+    bad = client.put("/api/settings", json={"smtp_user": "me@gmail.com", "smtp_password": "MyGmailPass1!"})
+    assert bad.status_code == 400 and "App Password" in bad.json()["detail"]
+    ok = client.put("/api/settings", json={"smtp_user": "me@gmail.com", "smtp_password": "abcd efgh ijkl mnop",
+                                           "daily_send_limit": "1"})
+    assert ok.json()["smtp_password_set"] and ok.json()["email_sending"]["configured"]
+    assert "abcd" not in ok.text
+
+    lead = client.post(f"/api/leads/{lead_id}/send-email").json()
+    assert sent == [("owner@a.ph", "hi")] and lead["status"] == "contacted" and lead["email_sent_at"]
+    assert lead["emails_sent"] == 1 and lead["contacted_at"]
+    assert client.get("/api/settings").json()["email_sending"]["sent_last_24h"] == 1
+
+    other = store.upsert_lead({"name": "B", "address": "2", "has_website": 1, "email": "b@b.ph",
+                               "subject": "s", "body": "b"})
+    capped = client.post(f"/api/leads/{other}/send-email")
+    assert capped.status_code == 429 and "Daily limit" in capped.json()["detail"]
+    assert len(sent) == 1
+
+
+def test_send_email_reports_mail_errors(client, store, monkeypatch):
+    from hala import mailer
+
+    def boom(*a, **k):
+        raise mailer.MailError("The mail server rejected the login.")
+    monkeypatch.setattr(mailer, "send_email", boom)
+    client.put("/api/settings", json={"smtp_user": "me@gmail.com", "smtp_password": "abcdefghijklmnop"})
+    lead_id = store.upsert_lead({"name": "A", "address": "1", "has_website": 1, "email": "a@a.ph",
+                                 "subject": "s", "body": "b"})
+    r = client.post(f"/api/leads/{lead_id}/send-email")
+    assert r.status_code == 502 and "rejected the login" in r.json()["detail"]
+    assert client.get(f"/api/leads/{lead_id}").json()["status"] == "new"  # not marked when it failed

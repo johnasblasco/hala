@@ -52,6 +52,8 @@ export interface Lead {
   message: string;
   status: Status;
   contacted_at: string;
+  email_sent_at: string;
+  emails_sent: number;
   notes: string;
   search_query: string;
   created_at: string;
@@ -97,6 +99,12 @@ export interface Settings {
   ai_model: string;
   ai_base_url: string;
   ai_providers: AIProvider[];
+  smtp_user: string;
+  smtp_host: string;
+  smtp_port: string;
+  daily_send_limit: string;
+  email_sending: { configured: boolean; limit: number; sent_last_24h: number };
+  smtp_password_set: boolean;
   google_api_key_set: boolean;
   [key: `${string}_api_key_set`]: boolean;
 }

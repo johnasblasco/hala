@@ -54,6 +54,8 @@ export const api = {
     id: number,
     body: { notes: string; photos: string[]; facebook_url: string; language: string },
   ) => request<Lead>(`/api/leads/${id}/preview`, { method: "POST", body: json(body) }),
+  sendEmail: (id: number) => request<Lead>(`/api/leads/${id}/send-email`, { method: "POST" }),
+  testEmail: () => request<{ ok: boolean; message: string }>("/api/settings/test-email", { method: "POST" }),
   refreshLead: (id: number) => request<Lead>(`/api/leads/${id}/refresh`, { method: "POST" }),
   audit: (url: string) => request<AuditResult>("/api/audit", { method: "POST", body: json({ url }) }),
   settings: () => request<Settings>("/api/settings"),

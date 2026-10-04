@@ -18,6 +18,8 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<{ ok: boolean; message: string; provider?: string; model?: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [mailTest, setMailTest] = useState<{ ok: boolean; message: string } | null>(null);
+  const [mailTesting, setMailTesting] = useState(false);
 
   useEffect(() => {
     api.settings().then(load).catch((e) => setError(e.message));
@@ -36,8 +38,27 @@ export default function SettingsPage() {
       ai_model: s.ai_model,
       ai_base_url: s.ai_base_url,
       google_api_key: "",
+      smtp_user: s.smtp_user,
+      smtp_password: "",
+      smtp_host: s.smtp_host,
+      smtp_port: s.smtp_port,
+      daily_send_limit: s.daily_send_limit,
       ...Object.fromEntries(s.ai_providers.map((p) => [`${p.id}_api_key`, ""])),
     });
+  }
+
+  async function testEmail() {
+    setMailTesting(true);
+    setMailTest(null);
+    setError(null);
+    try {
+      load(await api.saveSettings(form));
+      setMailTest(await api.testEmail());
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setMailTesting(false);
+    }
   }
 
   async function testAI() {
@@ -98,6 +119,79 @@ export default function SettingsPage() {
             {"hint" in f && <small className="muted">{f.hint}</small>}
           </label>
         ))}
+
+        <h2>Email sending (optional)</h2>
+        <p className="muted small" style={{ marginTop: -8 }}>
+          Lets the Send button email leads straight from your Gmail. Without it, Send opens Gmail with the email ready.
+        </p>
+        <label>
+          <span>Gmail address</span>
+          <input
+            type="email"
+            name="hala-smtp-user"
+            autoComplete="off"
+            data-lpignore="true"
+            data-1p-ignore="true"
+            value={form.smtp_user ?? ""}
+            onChange={(e) => setForm({ ...form, smtp_user: e.target.value })}
+            placeholder="you@gmail.com"
+          />
+        </label>
+        <SecretField
+          label="Gmail App Password"
+          hint="Not your normal password. Turn on 2-Step Verification, then create one at myaccount.google.com/apppasswords (16 letters)."
+          isSet={!!settings.smtp_password_set}
+          value={form.smtp_password ?? ""}
+          onChange={(v) => setForm({ ...form, smtp_password: v })}
+          onClear={() => clear("smtp_password")}
+        />
+        <label>
+          <span>Daily limit</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={form.daily_send_limit ?? ""}
+            onChange={(e) => setForm({ ...form, daily_send_limit: e.target.value })}
+            placeholder="25"
+          />
+          <small className="muted">
+            Max emails per 24 hours ({settings.email_sending.sent_last_24h} sent so far). Keep it low: Gmail flags
+            accounts that send many cold emails.
+          </small>
+        </label>
+        <details>
+          <summary className="muted small">Not using Gmail? Mail server settings</summary>
+          <div className="form" style={{ marginTop: 12 }}>
+            <label>
+              <span>SMTP host</span>
+              <input
+                value={form.smtp_host ?? ""}
+                onChange={(e) => setForm({ ...form, smtp_host: e.target.value })}
+                placeholder="smtp.gmail.com"
+              />
+            </label>
+            <label>
+              <span>Port</span>
+              <input
+                value={form.smtp_port ?? ""}
+                onChange={(e) => setForm({ ...form, smtp_port: e.target.value })}
+                placeholder="465"
+              />
+            </label>
+          </div>
+        </details>
+        <div className="actions">
+          <button type="button" className="btn" onClick={testEmail} disabled={mailTesting}>
+            {mailTesting ? "Sending test…" : "Save & send test email to myself"}
+          </button>
+          {mailTest && (
+            <span className={`test-result ${mailTest.ok ? "ok-text" : "error-text"}`}>
+              {mailTest.ok ? "✓ " : "✗ "}
+              {mailTest.message}
+            </span>
+          )}
+        </div>
 
         <h2>Lead search (optional)</h2>
         <SecretField

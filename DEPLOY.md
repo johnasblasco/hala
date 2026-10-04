@@ -42,6 +42,7 @@ can't read them. Only the server's database connection can.
    | `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | AI writing for emails and previews (or paste the key in Settings) | no |
    | `HALA_AI_PROVIDER` | `anthropic`, `gemini`, `groq`, `openrouter`, `openai` or `custom` (else the one with a key) | no |
    | `GOOGLE_MAPS_API_KEY` | for bigger lead lists | no |
+   | `HALA_SMTP_USER` / `HALA_SMTP_PASSWORD` | Gmail address + App Password for the Send button (or set in Settings) | no |
    | `HALA_PUBLIC_URL` | your custom domain, e.g. `https://app.yourstudio.com` | no |
 
    Without the login settings, the deployed API refuses every request, so it
