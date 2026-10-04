@@ -1,10 +1,25 @@
+import { accessToken } from "./auth";
 import type { AuditResult, Job, Lead, Settings, Stats } from "./types";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/** Fired when the server says the session is missing or expired. */
+export const AUTH_EXPIRED = "hala:auth-expired";
+
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  const token = await accessToken();
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
+  if (res.status === 401) window.dispatchEvent(new Event(AUTH_EXPIRED));
+  return res;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(path, init);
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -24,6 +39,7 @@ export const api = {
   search: (queries: string[], source: string) =>
     request<Job>("/api/search", { method: "POST", body: json({ queries, source }) }),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
+  stepJob: (id: string) => request<Job>(`/api/jobs/${id}/step`, { method: "POST" }),
   leads: (params: { kind?: string; status?: string; q?: string }) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v) as [string, string][],
@@ -41,3 +57,15 @@ export const api = {
     request<Settings>("/api/settings", { method: "PUT", body: json(values) }),
   clearSecret: (key: string) => request<Settings>(`/api/settings/${key}`, { method: "DELETE" }),
 };
+
+/** Download a file from a protected endpoint (plain links can't send the login token). */
+export async function download(path: string, filename: string) {
+  const res = await authFetch(path);
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

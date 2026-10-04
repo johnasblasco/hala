@@ -24,6 +24,11 @@ Your browser opens at http://localhost:8000. From there you can:
 
 Your data lives in `~/.hala/hala.db` (on Windows, `C:\Users\<you>\.hala\hala.db`).
 
+### Putting it online
+
+To use Hala from anywhere, with a login and your data in Supabase, see
+**[DEPLOY.md](DEPLOY.md)** (Vercel + Supabase).
+
 ### Changing the web app
 
 The built UI is committed in `hala/static/`, so you don't need Node.js just to

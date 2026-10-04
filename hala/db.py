@@ -1,62 +1,82 @@
-"""SQLite storage for leads and settings. One file, no server to run."""
+"""Storage for leads, settings and search jobs.
+
+Two backends behind one class:
+- SQLite (default): one local file, nothing to set up. Used by `hala serve`.
+- Postgres (when DATABASE_URL is set, e.g. Supabase): needed on Vercel, where
+  the filesystem is temporary and every request may hit a different instance.
+
+On Postgres the tables live in their own `hala` schema with row level security
+enabled, so Supabase's public REST API (which uses the anon key that ships to
+browsers) cannot read them. Only the server's direct database connection can.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# On Vercel only /tmp is writable, and it is wiped between cold starts: data there
-# is NOT durable. Point HALA_DB at persistent storage for a real deployment.
-_FALLBACK = Path("/tmp/hala.db") if os.environ.get("VERCEL") else Path.home() / ".hala" / "hala.db"
-DEFAULT_PATH = Path(os.environ.get("HALA_DB", _FALLBACK))
+DEFAULT_PATH = Path(os.environ.get("HALA_DB", Path.home() / ".hala" / "hala.db"))
 
 STATUSES = ("new", "contacted", "replied", "meeting", "won", "lost", "skip")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS leads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL DEFAULT '',
-    email TEXT NOT NULL DEFAULT '',
-    website TEXT NOT NULL DEFAULT '',
-    phone TEXT NOT NULL DEFAULT '',
-    category TEXT NOT NULL DEFAULT '',
-    city TEXT NOT NULL DEFAULT '',
-    address TEXT NOT NULL DEFAULT '',
-    maps_url TEXT NOT NULL DEFAULT '',
-    facebook_search TEXT NOT NULL DEFAULT '',
-    reviews TEXT NOT NULL DEFAULT '',
-    rating TEXT NOT NULL DEFAULT '',
-    has_website INTEGER NOT NULL DEFAULT 0,
-    reachable INTEGER,
-    site_score INTEGER,
-    tier TEXT NOT NULL DEFAULT '',
-    qual_score INTEGER,
-    reasons TEXT NOT NULL DEFAULT '',
-    top_issue TEXT NOT NULL DEFAULT '',
-    findings TEXT NOT NULL DEFAULT '[]',
-    report_html TEXT NOT NULL DEFAULT '',
-    subject TEXT NOT NULL DEFAULT '',
-    body TEXT NOT NULL DEFAULT '',
-    angle TEXT NOT NULL DEFAULT '',
-    pitch_source TEXT NOT NULL DEFAULT '',
-    message TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'new',
-    notes TEXT NOT NULL DEFAULT '',
-    search_query TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
+# (name, type) for every lead column except the id. New columns added here are
+# created automatically on existing databases at startup.
+LEAD_COLUMNS = [
+    ("key", "TEXT NOT NULL"),
+    ("name", "TEXT NOT NULL DEFAULT ''"),
+    ("email", "TEXT NOT NULL DEFAULT ''"),
+    ("website", "TEXT NOT NULL DEFAULT ''"),
+    ("phone", "TEXT NOT NULL DEFAULT ''"),
+    ("category", "TEXT NOT NULL DEFAULT ''"),
+    ("city", "TEXT NOT NULL DEFAULT ''"),
+    ("address", "TEXT NOT NULL DEFAULT ''"),
+    ("maps_url", "TEXT NOT NULL DEFAULT ''"),
+    ("facebook_search", "TEXT NOT NULL DEFAULT ''"),
+    ("reviews", "TEXT NOT NULL DEFAULT ''"),
+    ("rating", "TEXT NOT NULL DEFAULT ''"),
+    ("has_website", "INTEGER NOT NULL DEFAULT 0"),
+    ("reachable", "INTEGER"),
+    ("site_score", "INTEGER"),
+    ("tier", "TEXT NOT NULL DEFAULT ''"),
+    ("qual_score", "INTEGER"),
+    ("reasons", "TEXT NOT NULL DEFAULT ''"),
+    ("top_issue", "TEXT NOT NULL DEFAULT ''"),
+    ("findings", "TEXT NOT NULL DEFAULT '[]'"),
+    ("report_html", "TEXT NOT NULL DEFAULT ''"),
+    ("report_token", "TEXT NOT NULL DEFAULT ''"),
+    ("subject", "TEXT NOT NULL DEFAULT ''"),
+    ("body", "TEXT NOT NULL DEFAULT ''"),
+    ("angle", "TEXT NOT NULL DEFAULT ''"),
+    ("pitch_source", "TEXT NOT NULL DEFAULT ''"),
+    ("message", "TEXT NOT NULL DEFAULT ''"),
+    ("status", "TEXT NOT NULL DEFAULT 'new'"),
+    ("notes", "TEXT NOT NULL DEFAULT ''"),
+    ("search_query", "TEXT NOT NULL DEFAULT ''"),
+    ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+]
+
+JOB_COLUMNS = [
+    ("status", "TEXT NOT NULL DEFAULT 'queued'"),   # queued | running | done | error
+    ("stage", "TEXT NOT NULL DEFAULT ''"),
+    ("done", "INTEGER NOT NULL DEFAULT 0"),
+    ("total", "INTEGER NOT NULL DEFAULT 0"),
+    ("error", "TEXT"),
+    ("with_website", "INTEGER NOT NULL DEFAULT 0"),
+    ("no_website", "INTEGER NOT NULL DEFAULT 0"),
+    ("request", "TEXT NOT NULL DEFAULT '{}'"),
+    ("pending", "TEXT NOT NULL DEFAULT '[]'"),
+    ("lease_until", "TEXT NOT NULL DEFAULT ''"),
+    ("created_at", "TEXT NOT NULL DEFAULT ''"),
+    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+]
+PUBLIC_JOB_FIELDS = ("id", "status", "stage", "done", "total", "error", "with_website", "no_website")
 
 # Fields refreshed by a new search or re-audit. Status, notes and anything the
 # user has worked on are never overwritten.
@@ -80,27 +100,96 @@ def lead_key(name: str, address: str, website: str = "") -> str:
     return "|".join(x.strip().lower() for x in (name, address or website))
 
 
+def _is_postgres(target: str) -> bool:
+    return target.startswith(("postgres://", "postgresql://"))
+
+
 class Store:
-    def __init__(self, path: str | Path = DEFAULT_PATH):
-        self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, target: str | Path | None = None):
+        target = str(target or os.environ.get("DATABASE_URL") or DEFAULT_PATH)
+        self.target = target
+        self.pg = _is_postgres(target)
+        self.path = "postgres" if self.pg else target
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._conn.executescript(SCHEMA)
-            self._conn.commit()
+        self._conn = None
+        prefix = "hala." if self.pg else ""
+        self.leads, self.settings_t, self.jobs = (f"{prefix}leads", f"{prefix}settings",
+                                                  f"{prefix}jobs")
+        if not self.pg and target != ":memory:":
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+        self._migrate()
+
+    # --- connection --------------------------------------------------------
+
+    def _connect(self):
+        if self.pg:
+            import psycopg
+            from psycopg.rows import dict_row
+            # prepare_threshold=None: Supabase's pooler (transaction mode) can't
+            # keep prepared statements between transactions.
+            return psycopg.connect(self.target, row_factory=dict_row, prepare_threshold=None,
+                                   connect_timeout=10)
+        conn = sqlite3.connect(self.target, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     @contextmanager
     def _tx(self):
+        """Yield an `exec(sql, args)` function; SQL uses `?` placeholders on both backends."""
         with self._lock:
+            if self._conn is None or (self.pg and (self._conn.closed or self._conn.broken)):
+                self._conn = self._connect()
+            conn = self._conn
+
+            def run(sql: str, args=()):
+                if self.pg:
+                    sql = sql.replace("?", "%s")
+                cur = conn.cursor()
+                cur.execute(sql, tuple(args))
+                return cur
+
             try:
-                yield self._conn
-                self._conn.commit()
+                yield run
+                conn.commit()
             except Exception:
-                self._conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    self._conn = None  # connection is gone; reconnect next time
                 raise
+
+    def _migrate(self) -> None:
+        id_col = ("id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" if self.pg
+                  else "id INTEGER PRIMARY KEY AUTOINCREMENT")
+        cols = lambda spec: ", ".join(f"{n} {t}" for n, t in spec)  # noqa: E731
+        with self._tx() as run:
+            if self.pg:
+                run("CREATE SCHEMA IF NOT EXISTS hala")
+            run(f"CREATE TABLE IF NOT EXISTS {self.leads} ({id_col}, {cols(LEAD_COLUMNS)})")
+            run(f"CREATE TABLE IF NOT EXISTS {self.settings_t} (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            run(f"CREATE TABLE IF NOT EXISTS {self.jobs} (id TEXT PRIMARY KEY, {cols(JOB_COLUMNS)})")
+            for table, spec in ((self.leads, LEAD_COLUMNS), (self.jobs, JOB_COLUMNS)):
+                have = self._columns(run, table)
+                for name, typ in spec:
+                    if name not in have:
+                        run(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+            run(f"CREATE UNIQUE INDEX IF NOT EXISTS leads_key_idx ON {self.leads} (key)")
+            run(f"CREATE INDEX IF NOT EXISTS leads_token_idx ON {self.leads} (report_token)")
+            if self.pg:
+                for t in (self.leads, self.settings_t, self.jobs):
+                    run(f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY")
+            missing = run(f"SELECT id FROM {self.leads} WHERE report_token = ''").fetchall()
+            for r in missing:
+                run(f"UPDATE {self.leads} SET report_token = ? WHERE id = ?",
+                    (secrets.token_urlsafe(12), r["id"]))
+
+    def _columns(self, run, table: str) -> set[str]:
+        if self.pg:
+            schema, name = table.split(".")
+            rows = run("SELECT column_name FROM information_schema.columns "
+                       "WHERE table_schema = ? AND table_name = ?", (schema, name)).fetchall()
+            return {r["column_name"] for r in rows}
+        return {r["name"] for r in run(f"PRAGMA table_info({table})").fetchall()}
 
     # --- leads -------------------------------------------------------------
 
@@ -112,25 +201,33 @@ class Store:
         if isinstance(row.get("findings"), list):
             row["findings"] = json.dumps(row["findings"])
         now = _now()
-        with self._tx() as c:
-            existing = c.execute("SELECT id, status FROM leads WHERE key = ?", (key,)).fetchone()
+        with self._tx() as run:
+            existing = run(f"SELECT id, status FROM {self.leads} WHERE key = ?", (key,)).fetchone()
             if existing is None:
-                cols = ["key", "created_at", "updated_at", *row]
-                c.execute(f"INSERT INTO leads ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                          [key, now, now, *row.values()])
-                return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                cols = ["key", "report_token", "created_at", "updated_at", *row]
+                values = [key, secrets.token_urlsafe(12), now, now, *row.values()]
+                cur = run(f"INSERT INTO {self.leads} ({', '.join(cols)}) "
+                          f"VALUES ({', '.join('?' * len(cols))}) RETURNING id", values)
+                return cur.fetchone()["id"]
             if existing["status"] != "new":
                 # The user is already working this lead: keep their copy.
                 row = {k: v for k, v in row.items() if k not in PITCH_FIELDS}
             sets = ", ".join(f"{k} = ?" for k in row)
-            c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?",
-                      [*row.values(), now, existing["id"]])
+            run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ?",
+                [*row.values(), now, existing["id"]])
             return existing["id"]
 
     def get_lead(self, lead_id: int, with_report: bool = False) -> dict | None:
-        with self._tx() as c:
-            r = c.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        with self._tx() as run:
+            r = run(f"SELECT * FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
         return self._row(r, with_report) if r else None
+
+    def get_lead_by_token(self, token: str) -> dict | None:
+        if not token:
+            return None
+        with self._tx() as run:
+            r = run(f"SELECT * FROM {self.leads} WHERE report_token = ?", (token,)).fetchone()
+        return self._row(r, True) if r else None
 
     def list_leads(self, has_website: bool | None = None, status: str | None = None,
                    q: str | None = None) -> list[dict]:
@@ -142,14 +239,16 @@ class Store:
             where.append("status = ?")
             args.append(status)
         if q:
-            where.append("(name LIKE ? OR city LIKE ? OR category LIKE ? OR email LIKE ?)")
-            args.extend([f"%{q}%"] * 4)
-        sql = "SELECT * FROM leads"
+            where.append("(LOWER(name) LIKE ? OR LOWER(city) LIKE ? OR LOWER(category) LIKE ? "
+                         "OR LOWER(email) LIKE ?)")
+            args.extend([f"%{q.lower()}%"] * 4)
+        cols = ", ".join(["id"] + [n for n, _ in LEAD_COLUMNS if n != "report_html"])
+        sql = f"SELECT {cols} FROM {self.leads}"
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY (qual_score IS NULL), qual_score DESC, id DESC"
-        with self._tx() as c:
-            return [self._row(r) for r in c.execute(sql, args).fetchall()]
+        with self._tx() as run:
+            return [self._row(r) for r in run(sql, args).fetchall()]
 
     def update_lead(self, lead_id: int, changes: dict) -> dict | None:
         changes = {k: v for k, v in changes.items() if k in EDITABLE_FIELDS}
@@ -157,35 +256,41 @@ class Store:
             raise ValueError(f"unknown status {changes['status']!r}")
         if changes:
             sets = ", ".join(f"{k} = ?" for k in changes)
-            with self._tx() as c:
-                c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?",
-                          [*changes.values(), _now(), lead_id])
+            with self._tx() as run:
+                run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ?",
+                    [*changes.values(), _now(), lead_id])
         return self.get_lead(lead_id)
 
     def delete_lead(self, lead_id: int) -> None:
-        with self._tx() as c:
-            c.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        with self._tx() as run:
+            run(f"DELETE FROM {self.leads} WHERE id = ?", (lead_id,))
 
     def stats(self) -> dict:
-        with self._tx() as c:
-            by_status = dict(c.execute("SELECT status, COUNT(*) FROM leads GROUP BY status").fetchall())
-            total, with_site, no_site, tier_a = c.execute(
-                "SELECT COUNT(*), SUM(has_website = 1), SUM(has_website = 0), "
-                "SUM(tier = 'A') FROM leads").fetchone()
-            angles = c.execute(
-                "SELECT angle, COUNT(*) AS sent, "
-                "SUM(status IN ('replied', 'meeting', 'won')) AS replies "
-                "FROM leads WHERE status NOT IN ('new', 'skip') AND angle != '' "
-                "GROUP BY angle ORDER BY sent DESC").fetchall()
+        with self._tx() as run:
+            by_status = {r["status"]: r["n"] for r in run(
+                f"SELECT status, COUNT(*) AS n FROM {self.leads} GROUP BY status").fetchall()}
+            t = run(f"""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN has_website = 1 THEN 1 ELSE 0 END) AS with_site,
+                       SUM(CASE WHEN has_website = 0 THEN 1 ELSE 0 END) AS no_site,
+                       SUM(CASE WHEN tier = 'A' THEN 1 ELSE 0 END) AS tier_a
+                FROM {self.leads}""").fetchone()
+            angles = run(f"""
+                SELECT angle, COUNT(*) AS sent,
+                       SUM(CASE WHEN status IN ('replied', 'meeting', 'won') THEN 1 ELSE 0 END) AS replies
+                FROM {self.leads}
+                WHERE status NOT IN ('new', 'skip') AND angle != ''
+                GROUP BY angle ORDER BY sent DESC""").fetchall()
         return {
-            "total": total or 0, "with_website": with_site or 0, "no_website": no_site or 0,
-            "tier_a": tier_a or 0,
-            "by_status": {s: by_status.get(s, 0) for s in STATUSES},
-            "angles": [dict(a) for a in angles],
+            "total": int(t["total"] or 0), "with_website": int(t["with_site"] or 0),
+            "no_website": int(t["no_site"] or 0), "tier_a": int(t["tier_a"] or 0),
+            "by_status": {s: int(by_status.get(s, 0)) for s in STATUSES},
+            "angles": [{"angle": a["angle"], "sent": int(a["sent"]), "replies": int(a["replies"] or 0)}
+                       for a in angles],
         }
 
     @staticmethod
-    def _row(r: sqlite3.Row, with_report: bool = False) -> dict:
+    def _row(r, with_report: bool = False) -> dict:
         d = dict(r)
         d["findings"] = json.loads(d.get("findings") or "[]")
         d["has_website"] = bool(d["has_website"])
@@ -195,11 +300,56 @@ class Store:
             d.pop("report_html", None)
         return d
 
+    # --- jobs --------------------------------------------------------------
+
+    def create_job(self, request: dict) -> dict:
+        job_id = secrets.token_hex(8)
+        now = _now()
+        with self._tx() as run:
+            run(f"INSERT INTO {self.jobs} (id, status, stage, request, created_at, updated_at) "
+                f"VALUES (?, 'queued', 'Starting', ?, ?, ?)", (job_id, json.dumps(request), now, now))
+        return self.get_job(job_id)
+
+    def get_job(self, job_id: str, internal: bool = False) -> dict | None:
+        with self._tx() as run:
+            r = run(f"SELECT * FROM {self.jobs} WHERE id = ?", (job_id,)).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        if internal:
+            d["request"] = json.loads(d["request"])
+            d["pending"] = json.loads(d["pending"])
+            return d
+        return {k: d[k] for k in PUBLIC_JOB_FIELDS}
+
+    def update_job(self, job_id: str, **fields) -> None:
+        if "pending" in fields:
+            fields["pending"] = json.dumps(fields["pending"])
+        fields["updated_at"] = _now()
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        with self._tx() as run:
+            run(f"UPDATE {self.jobs} SET {sets} WHERE id = ?", [*fields.values(), job_id])
+
+    def claim_job(self, job_id: str, seconds: int) -> bool:
+        """Take a short lease so two browser tabs can't process the same job at once."""
+        now = datetime.now(timezone.utc)
+        until = (now + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+        with self._tx() as run:
+            cur = run(f"UPDATE {self.jobs} SET lease_until = ? WHERE id = ? "
+                      f"AND (lease_until = '' OR lease_until < ?)",
+                      (until, job_id, now.isoformat(timespec="seconds")))
+            return cur.rowcount == 1
+
+    def release_job(self, job_id: str) -> None:
+        with self._tx() as run:
+            run(f"UPDATE {self.jobs} SET lease_until = '' WHERE id = ?", (job_id,))
+
     # --- settings ----------------------------------------------------------
 
     def get_settings(self) -> dict:
-        with self._tx() as c:
-            stored = dict(c.execute("SELECT key, value FROM settings").fetchall())
+        with self._tx() as run:
+            stored = {r["key"]: r["value"] for r in
+                      run(f"SELECT key, value FROM {self.settings_t}").fetchall()}
         env = {
             "sender_name": os.environ.get("HALA_SENDER_NAME", ""),
             "sender_company": os.environ.get("HALA_SENDER_COMPANY", ""),
@@ -213,11 +363,11 @@ class Store:
         return {k: stored.get(k) or env.get(k, "") for k in SETTING_KEYS}
 
     def save_settings(self, values: dict) -> None:
-        with self._tx() as c:
+        with self._tx() as run:
             for k, v in values.items():
                 if k in SETTING_KEYS and v is not None:
-                    c.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
-                              "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (k, str(v)))
+                    run(f"INSERT INTO {self.settings_t} (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (k, str(v)))
 
     def sender(self) -> dict:
         s = self.get_settings()

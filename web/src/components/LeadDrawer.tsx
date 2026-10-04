@@ -117,7 +117,7 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
           </a>
         )}
         {lead.has_website && (
-          <a href={`/reports/${lead.id}`} target="_blank" rel="noreferrer">
+          <a href={`/reports/${lead.report_token}`} target="_blank" rel="noreferrer">
             Audit report ↗
           </a>
         )}

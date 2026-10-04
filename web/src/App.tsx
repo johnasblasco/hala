@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { AUTH_EXPIRED } from "./api";
+import { currentSession, loadAuthConfig, signOut, supabase } from "./auth";
+import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Find from "./pages/Find";
 import Leads from "./pages/Leads";
@@ -26,14 +29,47 @@ export function go(page: PageId, query?: Record<string, string>) {
   window.location.hash = `/${page}${qs}`;
 }
 
+type Gate =
+  | { state: "loading" }
+  | { state: "error"; message: string }
+  | { state: "login"; notice: string | null }
+  | { state: "in"; email: string | null };
+
 export default function App() {
   const [route, setRoute] = useState(readHash);
+  const [gate, setGate] = useState<Gate>({ state: "loading" });
 
   useEffect(() => {
     const onHash = () => setRoute(readHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  async function checkSession(notice: string | null = null) {
+    try {
+      const cfg = await loadAuthConfig();
+      if (!cfg) return setGate({ state: "in", email: null });
+      const session = await currentSession();
+      setGate(session ? { state: "in", email: session.user.email ?? null } : { state: "login", notice });
+    } catch (e) {
+      setGate({ state: "error", message: (e as Error).message });
+    }
+  }
+
+  useEffect(() => {
+    checkSession();
+    const onExpired = async () => {
+      if (!supabase()) return;
+      await signOut();
+      setGate({ state: "login", notice: "Your session ended. Please log in again." });
+    };
+    window.addEventListener(AUTH_EXPIRED, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED, onExpired);
+  }, []);
+
+  if (gate.state === "loading") return <p className="muted center">Loading…</p>;
+  if (gate.state === "error") return <div className="alert alert-error center">{gate.message}</div>;
+  if (gate.state === "login") return <Login notice={gate.notice} onDone={() => checkSession()} />;
 
   return (
     <div className="shell">
@@ -54,6 +90,22 @@ export default function App() {
             {p.label}
           </a>
         ))}
+        {gate.email && (
+          <div className="account">
+            <span className="account-email" title={gate.email}>
+              {gate.email}
+            </span>
+            <button
+              className="btn btn-small"
+              onClick={async () => {
+                await signOut();
+                setGate({ state: "login", notice: null });
+              }}
+            >
+              Log out
+            </button>
+          </div>
+        )}
       </nav>
       <main className="content">
         {route.page === "dashboard" && <Dashboard />}

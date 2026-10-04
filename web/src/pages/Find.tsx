@@ -31,14 +31,65 @@ export default function Find() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const timer = useRef<number | null>(null);
+  const alive = useRef(true);
+  const looping = useRef<string | null>(null);
 
   useEffect(() => {
+    alive.current = true;
     api.settings().then(setSettings).catch(() => undefined);
+    // Pick up a search that was still running when you left this page.
+    const saved = readActiveJob();
+    if (saved) {
+      api
+        .job(saved)
+        .then((j) => {
+          setJob(j);
+          if (j.status === "queued" || j.status === "running") drive(j.id);
+          else clearActiveJob();
+        })
+        .catch(clearActiveJob);
+    }
     return () => {
-      if (timer.current) window.clearInterval(timer.current);
+      alive.current = false;
+      looping.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Advance the job step by step until it finishes. Each step is one short request. */
+  async function drive(id: string) {
+    if (looping.current === id) return;
+    looping.current = id;
+    setError(null);
+    // While a long step runs (the search itself), show its live stage text.
+    const poll = window.setInterval(() => {
+      api.job(id).then((j) => alive.current && looping.current === id && setJob(j)).catch(() => undefined);
+    }, 2500);
+    let failures = 0;
+    try {
+      while (alive.current && looping.current === id) {
+        try {
+          const next = await api.stepJob(id);
+          failures = 0;
+          if (!alive.current) return;
+          setJob(next);
+          if (next.status === "done" || next.status === "error") {
+            clearActiveJob();
+            return;
+          }
+        } catch (err) {
+          if (++failures >= 3) {
+            setError(`${(err as Error).message}. Your progress is saved, so click Resume to continue.`);
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 2000 * failures));
+        }
+      }
+    } finally {
+      window.clearInterval(poll);
+      if (looping.current === id) looping.current = null;
+    }
+  }
 
   const provinceCities = PROVINCES.find((p) => p.province === province)?.cities ?? [];
   const shown = provinceCities.filter((c) => c.toLowerCase().includes(filter.toLowerCase()));
@@ -67,7 +118,7 @@ export default function Find() {
   }
 
   const allShownChecked = shown.length > 0 && shown.every((c) => cities.includes(c));
-  const running = job?.status === "running";
+  const running = job?.status === "running" || job?.status === "queued";
 
   async function start(e: React.FormEvent) {
     e.preventDefault();
@@ -75,14 +126,8 @@ export default function Find() {
     try {
       const j = await api.search(queries, source);
       setJob(j);
-      timer.current = window.setInterval(async () => {
-        const next = await api.job(j.id);
-        setJob(next);
-        if (next.status !== "running" && timer.current) {
-          window.clearInterval(timer.current);
-          timer.current = null;
-        }
-      }, 1000);
+      saveActiveJob(j.id);
+      drive(j.id);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -201,12 +246,19 @@ export default function Find() {
           </button>
         </div>
         <ErrorBox error={error} />
+        {error && job && running && (
+          <div>
+            <button type="button" className="btn" onClick={() => drive(job.id)}>
+              Resume
+            </button>
+          </div>
+        )}
       </form>
 
       {job && (
         <section className="card">
           <h2>{job.status === "done" ? "Done" : job.status === "error" ? "Something went wrong" : job.stage}</h2>
-          {job.status === "running" && (
+          {running && (
             <>
               <div className="progress">
                 <div className="progress-bar" style={{ width: `${job.total ? pct : 8}%` }} />
@@ -239,4 +291,30 @@ export default function Find() {
       )}
     </div>
   );
+}
+
+const JOB_KEY = "hala.find.job";
+
+function readActiveJob(): string | null {
+  try {
+    return localStorage.getItem(JOB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveJob(id: string) {
+  try {
+    localStorage.setItem(JOB_KEY, id);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function clearActiveJob() {
+  try {
+    localStorage.removeItem(JOB_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }

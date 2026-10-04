@@ -41,6 +41,7 @@ export interface Lead {
   reasons: string;
   top_issue: string;
   findings: Finding[];
+  report_token: string;
   subject: string;
   body: string;
   angle: string;
@@ -55,7 +56,7 @@ export interface Lead {
 
 export interface Job {
   id: string;
-  status: "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "error";
   stage: string;
   done: number;
   total: number;

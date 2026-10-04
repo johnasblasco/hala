@@ -1,33 +1,47 @@
-"""Web API and static file server for the Hala GUI.
+"""Web API (and, locally, the static UI) for Hala.
 
     hala serve            # http://localhost:8000
+
+Works the same locally and on Vercel:
+- Storage: SQLite locally, Postgres (Supabase) when DATABASE_URL is set.
+- Searches run as small steps the browser drives (POST /api/jobs/{id}/step),
+  because serverless functions stop as soon as they return a response.
+- Login: when SUPABASE_URL is set, every /api route needs a Supabase session
+  from an allowed email. Report pages stay public (they're linked in emails)
+  but are addressed by an unguessable token.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 import os
 import threading
-import uuid
+import time
+import urllib.error
+import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import find as finder
-from .audit import AuditResult, Finding, audit
-from .db import STATUSES, SECRET_KEYS, Store
+from .audit import audit
+from .db import SECRET_KEYS, STATUSES, Store
 from .pitch import no_website_message, write_pitch
 from .qualify import qualify
 from .report import render_report, slugify
 
 STATIC_DIR = Path(__file__).parent / "static"
+STEP_BATCH = 4          # websites audited per step request
+STEP_LEASE_SECONDS = 290
 
 
 def public_base_url(default: str = "http://localhost:8000") -> str:
@@ -44,6 +58,74 @@ def public_base_url(default: str = "http://localhost:8000") -> str:
         if host:
             return f"https://{host}"
     return default
+
+
+# --- auth ------------------------------------------------------------------
+
+def auth_config() -> dict | None:
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_PUBLISHABLE_KEY") or ""
+    if url and key:
+        return {"url": url, "anon_key": key}
+    return None
+
+
+def allowed_emails() -> set[str]:
+    raw = os.environ.get("HALA_ALLOWED_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+_token_cache: dict[str, tuple[str, float]] = {}
+_token_lock = threading.Lock()
+
+
+def verify_token(token: str, cfg: dict) -> str | None:
+    """Ask Supabase who this access token belongs to. Returns the email, or None.
+
+    Works with both legacy (HS256) and new asymmetric Supabase signing keys,
+    since Supabase does the verification. Results are cached for 5 minutes.
+    """
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    now = time.time()
+    with _token_lock:
+        hit = _token_cache.get(digest)
+        if hit and hit[1] > now:
+            return hit[0]
+    req = urllib.request.Request(f"{cfg['url']}/auth/v1/user", headers={
+        "apikey": cfg["anon_key"], "Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            email = (json.loads(resp.read()).get("email") or "").lower()
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if email:
+        with _token_lock:
+            if len(_token_cache) > 1000:
+                _token_cache.clear()
+            _token_cache[digest] = (email, now + 300)
+    return email or None
+
+
+def require_user(request: Request) -> str | None:
+    cfg = auth_config()
+    if cfg is None:
+        if os.environ.get("VERCEL") and not os.environ.get("HALA_ALLOW_NO_AUTH"):
+            raise HTTPException(503, "Login isn't configured. Set SUPABASE_URL, SUPABASE_ANON_KEY "
+                                     "and HALA_ALLOWED_EMAILS in Vercel.")
+        return None  # local use: no login
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(401, "Please log in.")
+    email = verify_token(token, cfg)
+    if not email:
+        raise HTTPException(401, "Your session expired. Please log in again.")
+    allowed = allowed_emails()
+    if not allowed:
+        raise HTTPException(403, "No one is allowed in yet. Set HALA_ALLOWED_EMAILS in Vercel.")
+    if email not in allowed:
+        raise HTTPException(403, f"{email} isn't allowed to use this Hala workspace.")
+    return email
 
 
 # --- request bodies --------------------------------------------------------
@@ -88,26 +170,19 @@ def _claude_client(settings: dict):
     return anthropic.Anthropic(api_key=settings["anthropic_api_key"])
 
 
-def _audit_from_lead(lead: dict) -> AuditResult:
-    """Rebuild an AuditResult from stored data (for re-pitching without re-fetching)."""
-    r = AuditResult(url=lead["website"], reachable=lead.get("reachable") is not False)
-    r.findings = [Finding(**f) for f in lead.get("findings", [])]
-    return r
+def report_slug(token: str, name: str) -> str:
+    return f"{slugify(name)}-{token}"
 
 
-def report_slug(lead_id: int, name: str) -> str:
-    return f"{slugify(name)}-{lead_id}"
-
-
-def report_url(settings: dict, lead_id: int, name: str, local_base: str) -> str:
+def report_url(settings: dict, token: str, name: str, local_base: str) -> str:
     base = (settings.get("report_base_url") or "").rstrip("/")
     if base:
-        return f"{base}/{report_slug(lead_id, name)}.html"
-    return f"{local_base}/reports/{lead_id}"
+        return f"{base}/{report_slug(token, name)}.html"
+    return f"{local_base}/reports/{token}"
 
 
 def process_site_lead(store: Store, lead: dict, settings: dict, client, local_base: str,
-                      result: AuditResult | None = None) -> int:
+                      result=None) -> int:
     """Audit (unless given), qualify, render report and write the pitch for one lead."""
     result = result or audit(lead["website"])
     q = qualify(lead, result)
@@ -123,11 +198,12 @@ def process_site_lead(store: Store, lead: dict, settings: dict, client, local_ba
         "findings": [asdict(f) for f in result.findings],
     }
     lead_id = store.upsert_lead(data)
+    token = store.get_lead(lead_id)["report_token"]
     sender = store.sender()
     report = render_report(lead, result, sender)
     pitch_data: dict = {}
     if q.tier != "skip":
-        url = report_url(settings, lead_id, lead.get("name", ""), local_base)
+        url = report_url(settings, token, lead.get("name", ""), local_base)
         p = write_pitch(lead, result, url, sender, use_claude=client is not None, client=client)
         pitch_data = {"subject": p.subject, "body": p.body, "angle": p.angle,
                       "pitch_source": p.source}
@@ -135,80 +211,99 @@ def process_site_lead(store: Store, lead: dict, settings: dict, client, local_ba
     return lead_id
 
 
-class Jobs:
-    def __init__(self):
-        self._jobs: dict[str, dict] = {}
-        self._lock = threading.Lock()
+def _search_stage(store: Store, job: dict) -> None:
+    """First step: run the business search and queue every website for auditing."""
+    req = job["request"]
+    settings = store.get_settings()
+    source = req.get("source", "auto")
+    if source == "auto":
+        source = "google" if settings["google_api_key"] else "osm"
+    if source == "google":
+        if not settings["google_api_key"]:
+            raise RuntimeError("Add a Google API key in Settings, or use OpenStreetMap.")
+        search = finder.google_search(settings["google_api_key"])
+        store.update_job(job["id"], stage="Searching Google Maps")
+    else:
+        search = finder.osm_search(notify=lambda m: store.update_job(job["id"], stage=m))
+    queries = list(dict.fromkeys(q.strip() for q in req.get("queries", []) if q.strip()))
+    if not queries:
+        raise RuntimeError("Enter at least one search.")
 
-    def create(self) -> dict:
-        job = {"id": uuid.uuid4().hex[:12], "status": "running", "stage": "Starting",
-               "done": 0, "total": 0, "error": None, "with_website": 0, "no_website": 0}
-        with self._lock:
-            self._jobs[job["id"]] = job
-        return job
-
-    def get(self, job_id: str) -> dict | None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            return dict(job) if job else None
-
-    def update(self, job: dict, **kw) -> None:
-        with self._lock:
-            job.update(kw)
+    with_site, no_site = finder.find_leads(queries, search, req.get("max_per_query", 60),
+                                           lookup_emails=False)
+    label = ", ".join(queries)
+    sender = store.sender()
+    for lead in no_site:
+        store.upsert_lead({**lead, "has_website": 0, "search_query": label,
+                           "facebook_search": finder.facebook_search_url(lead),
+                           "message": no_website_message(lead, sender)})
+    pending = [{**l, "search_query": label} for l in with_site]
+    store.update_job(job["id"], status="running" if pending else "done",
+                     stage="Auditing websites" if pending else "Done",
+                     total=len(pending), with_website=len(with_site),
+                     no_website=len(no_site), pending=pending)
 
 
-def run_search(store: Store, jobs: Jobs, job: dict, req: SearchRequest, local_base: str) -> None:
+def _audit_stage(store: Store, job: dict, local_base: str) -> None:
+    """Later steps: find emails for and audit the next few websites."""
+    batch, rest = job["pending"][:STEP_BATCH], job["pending"][STEP_BATCH:]
+
+    def prepare(lead: dict):
+        if not lead.get("email"):
+            lead["email"] = finder.find_email(lead["website"])
+        return lead, audit(lead["website"])
+
+    settings = store.get_settings()
+    client = _claude_client(settings)
+    with ThreadPoolExecutor(max_workers=STEP_BATCH) as pool:
+        for lead, result in pool.map(prepare, batch):
+            process_site_lead(store, lead, settings, client, local_base, result)
+    store.update_job(job["id"], pending=rest, done=job["done"] + len(batch),
+                     status="running" if rest else "done",
+                     stage="Auditing websites" if rest else "Done")
+
+
+def step_job(store: Store, job_id: str, local_base: str) -> dict | None:
+    """Advance a search job by one step. Safe to call repeatedly and concurrently."""
+    job = store.get_job(job_id, internal=True)
+    if job is None or job["status"] in ("done", "error"):
+        return store.get_job(job_id)
+    if not store.claim_job(job_id, STEP_LEASE_SECONDS):
+        return store.get_job(job_id)  # another request is already working on it
     try:
-        settings = store.get_settings()
-        source = req.source
-        if source == "auto":
-            source = "google" if settings["google_api_key"] else "osm"
-        if source == "google":
-            if not settings["google_api_key"]:
-                raise RuntimeError("Add a Google API key in Settings, or use OpenStreetMap.")
-            search = finder.google_search(settings["google_api_key"])
+        if job["status"] == "queued":
+            _search_stage(store, job)
         else:
-            search = finder.osm_search(notify=lambda m: jobs.update(job, stage=m))
-        queries = list(dict.fromkeys(q.strip() for q in req.queries if q.strip()))
-        if not queries:
-            raise RuntimeError("Enter at least one search.")
-
-        jobs.update(job, stage=f"Searching {'Google Maps' if source == 'google' else 'OpenStreetMap'}")
-        with_site, no_site = finder.find_leads(queries, search, req.max_per_query)
-        query_label = ", ".join(queries)
-
-        sender = store.sender()
-        for lead in no_site:
-            store.upsert_lead({**lead, "has_website": 0, "search_query": query_label,
-                               "facebook_search": finder.facebook_search_url(lead),
-                               "message": no_website_message(lead, sender)})
-        jobs.update(job, no_website=len(no_site), with_website=len(with_site),
-                    total=len(with_site), stage="Auditing websites")
-
-        client = _claude_client(settings)
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(audit, l["website"]): l for l in with_site}
-            for fut in as_completed(futures):
-                lead = {**futures[fut], "search_query": query_label}
-                process_site_lead(store, lead, settings, client, local_base, fut.result())
-                jobs.update(job, done=job["done"] + 1)
-        jobs.update(job, status="done", stage="Done")
+            _audit_stage(store, job, local_base)
     except Exception as e:  # surfaced to the UI
-        jobs.update(job, status="error", error=str(e), stage="Failed")
+        store.update_job(job_id, status="error", error=str(e), stage="Failed")
+    finally:
+        store.release_job(job_id)
+    return store.get_job(job_id)
 
 
 # --- app -------------------------------------------------------------------
 
 def create_app(store: Store | None = None, local_base: str | None = None,
                serve_static: bool = True) -> FastAPI:
-    """Build the API. `serve_static=False` when the UI is deployed separately (Vercel)."""
+    """Build the app. `serve_static=False` when the UI is deployed separately (Vercel)."""
     local_base = local_base or public_base_url()
     store = store or Store()
-    jobs = Jobs()
     app = FastAPI(title="Hala")
     app.state.store = store
+    api = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
 
-    @app.get("/api/settings")
+    @app.get("/api/config")
+    def config():
+        """Public: tells the UI whether (and how) to show a login screen."""
+        cfg = auth_config()
+        return {"auth": {"supabase_url": cfg["url"], "anon_key": cfg["anon_key"]} if cfg else None}
+
+    @api.get("/me")
+    def me(user: str | None = Depends(require_user)):
+        return {"email": user}
+
+    @api.get("/settings")
     def get_settings():
         s = store.get_settings()
         # Never send secrets back to the browser; only whether they are set.
@@ -216,7 +311,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             s[k + "_set"] = bool(s.pop(k))
         return s
 
-    @app.put("/api/settings")
+    @api.put("/settings")
     def put_settings(patch: SettingsPatch):
         values = patch.model_dump(exclude_none=True)
         for k in SECRET_KEYS:
@@ -225,38 +320,42 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         store.save_settings(values)
         return get_settings()
 
-    @app.delete("/api/settings/{key}")
+    @api.delete("/settings/{key}")
     def clear_secret(key: str):
         if key not in SECRET_KEYS:
             raise HTTPException(400, "only API keys can be cleared")
         store.save_settings({key: ""})
         return get_settings()
 
-    @app.post("/api/search")
+    @api.post("/search")
     def start_search(req: SearchRequest):
-        job = jobs.create()
-        threading.Thread(target=run_search, args=(store, jobs, job, req, local_base),
-                         daemon=True).start()
-        return jobs.get(job["id"])
+        return store.create_job(req.model_dump())
 
-    @app.get("/api/jobs/{job_id}")
-    def get_job(job_id: str):
-        job = jobs.get(job_id)
+    @api.post("/jobs/{job_id}/step")
+    def advance_job(job_id: str):
+        job = step_job(store, job_id, local_base)
         if not job:
-            raise HTTPException(404, "job not found")
+            raise HTTPException(404, "search not found")
         return job
 
-    @app.post("/api/audit")
+    @api.get("/jobs/{job_id}")
+    def get_job(job_id: str):
+        job = store.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "search not found")
+        return job
+
+    @api.post("/audit")
     def audit_one(req: AuditRequest):
         r = audit(req.url.strip())
         return {**r.to_dict(), "findings": [asdict(f) for f in r.findings]}
 
-    @app.get("/api/leads")
+    @api.get("/leads")
     def list_leads(kind: str | None = None, status: str | None = None, q: str | None = None):
         has = {"site": True, "nosite": False}.get(kind or "")
         return store.list_leads(has, status or None, q or None)
 
-    @app.get("/api/leads.csv")
+    @api.get("/leads.csv")
     def export_csv(kind: str | None = None):
         has = {"site": True, "nosite": False}.get(kind or "")
         rows = store.list_leads(has)
@@ -270,14 +369,14 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return Response("﻿" + buf.getvalue(), media_type="text/csv",
                         headers={"Content-Disposition": "attachment; filename=hala-leads.csv"})
 
-    @app.get("/api/leads/{lead_id}")
+    @api.get("/leads/{lead_id}")
     def get_lead(lead_id: int):
         lead = store.get_lead(lead_id)
         if not lead:
             raise HTTPException(404, "lead not found")
         return lead
 
-    @app.patch("/api/leads/{lead_id}")
+    @api.patch("/leads/{lead_id}")
     def patch_lead(lead_id: int, patch: LeadPatch):
         try:
             lead = store.update_lead(lead_id, patch.model_dump(exclude_none=True))
@@ -287,12 +386,12 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             raise HTTPException(404, "lead not found")
         return lead
 
-    @app.delete("/api/leads/{lead_id}")
+    @api.delete("/leads/{lead_id}")
     def delete_lead(lead_id: int):
         store.delete_lead(lead_id)
         return {"ok": True}
 
-    @app.post("/api/leads/{lead_id}/refresh")
+    @api.post("/leads/{lead_id}/refresh")
     def refresh_lead(lead_id: int):
         """Re-audit the site and rewrite the pitch (resets an edited pitch)."""
         lead = store.get_lead(lead_id)
@@ -302,33 +401,37 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             raise HTTPException(400, "this business has no website to audit")
         if lead["status"] != "new":
             store.update_lead(lead_id, {"status": "new"})
-        process_site_lead(store, lead, store.get_settings(), _claude_client(store.get_settings()),
-                          local_base)
+        settings = store.get_settings()
+        process_site_lead(store, lead, settings, _claude_client(settings), local_base)
         store.update_lead(lead_id, {"status": lead["status"]})
         return store.get_lead(lead_id)
 
-    @app.get("/api/stats")
+    @api.get("/stats")
     def stats():
         return {**store.stats(), "statuses": list(STATUSES)}
 
-    @app.get("/reports/{lead_id}", response_class=HTMLResponse)
-    def report(lead_id: int):
-        lead = store.get_lead(lead_id, with_report=True)
-        if not lead or not lead.get("report_html"):
-            raise HTTPException(404, "no report for this lead")
-        return lead["report_html"]
-
-    @app.get("/api/reports.zip")
+    @api.get("/reports.zip")
     def reports_zip():
-        """All reports, named to match the links in the emails, for Cloudflare Pages."""
+        """All reports, named to match the links in the emails (for external hosting)."""
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for lead in store.list_leads(True):
                 full = store.get_lead(lead["id"], with_report=True)
                 if full and full["report_html"]:
-                    z.writestr(f"{report_slug(lead['id'], lead['name'])}.html", full["report_html"])
+                    z.writestr(f"{report_slug(full['report_token'], full['name'])}.html",
+                               full["report_html"])
         return Response(buf.getvalue(), media_type="application/zip",
                         headers={"Content-Disposition": "attachment; filename=hala-reports.zip"})
+
+    app.include_router(api)
+
+    @app.get("/reports/{token}", response_class=HTMLResponse)
+    def report(token: str):
+        """Public on purpose: this is the page linked from outreach emails."""
+        lead = store.get_lead_by_token(token)
+        if not lead or not lead.get("report_html"):
+            raise HTTPException(404, "report not found")
+        return lead["report_html"]
 
     if not serve_static:
         return app

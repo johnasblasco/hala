@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, download } from "../api";
 import { go } from "../App";
 import LeadDrawer from "../components/LeadDrawer";
 import { ErrorBox, ScoreBadge, StatusPill, TierBadge } from "../components/ui";
@@ -47,13 +47,20 @@ export default function Leads({ query }: { query: URLSearchParams }) {
           <p className="muted">Best leads first. Click a lead to see its audit and outreach.</p>
         </div>
         <div className="actions">
-          <a className="btn" href={`/api/leads.csv?kind=${kind}`}>
+          <button
+            className="btn"
+            onClick={() => download(`/api/leads.csv?kind=${kind}`, "hala-leads.csv").catch((e) => setError(e.message))}
+          >
             Export CSV
-          </a>
+          </button>
           {kind === "site" && (
-            <a className="btn" href="/api/reports.zip" title="Upload this to Cloudflare Pages">
+            <button
+              className="btn"
+              title="Only needed if you host reports somewhere else"
+              onClick={() => download("/api/reports.zip", "hala-reports.zip").catch((e) => setError(e.message))}
+            >
               Download reports
-            </a>
+            </button>
           )}
         </div>
       </header>

@@ -338,7 +338,7 @@ def _place_for(el: dict, places: list) -> str:
 # --- Shared ----------------------------------------------------------------
 
 def find_leads(queries: list[str], search, max_per_query: int = 60, workers: int = 8,
-               _find_email=None) -> tuple[list[dict], list[dict]]:
+               _find_email=None, lookup_emails: bool = True) -> tuple[list[dict], list[dict]]:
     """Return (leads with a website, businesses with no website at all).
 
     `search(query, max_results)` returns lead dicts (see google_search / osm_search).
@@ -356,6 +356,8 @@ def find_leads(queries: list[str], search, max_per_query: int = 60, workers: int
             continue
         seen.add(key)
         (with_site if lead["website"] else no_site).append(lead)
+    if not lookup_emails:
+        return with_site, no_site
     need_email = [l for l in with_site if not l["email"]]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for lead, email in zip(need_email, pool.map(lambda l: email_of(l["website"]), need_email)):
