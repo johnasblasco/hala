@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 DEFAULT_PATH = Path(os.environ.get("HALA_DB", Path.home() / ".hala" / "hala.db"))
 
 STATUSES = ("new", "contacted", "replied", "meeting", "won", "lost", "skip")
+MIGRATION_LOCK_ID = 72656161  # any fixed number, unique to Hala
 FOLLOW_UP_DAYS = 3  # contacted this long ago with no reply -> follow up
 
 # (name, type) for every lead column except the id. New columns added here are
@@ -240,6 +241,9 @@ class Store:
                   else "id INTEGER PRIMARY KEY AUTOINCREMENT")
         cols = lambda spec: ", ".join(f"{n} {t}" for n, t in spec)  # noqa: E731
         if self.pg:
+            # Serverless instances can start at the same moment; take turns so two of
+            # them never run the setup concurrently (lock is released at commit).
+            run("SELECT pg_advisory_xact_lock(?)", (MIGRATION_LOCK_ID,))
             run("CREATE SCHEMA IF NOT EXISTS hala")
         run(f"CREATE TABLE IF NOT EXISTS {self.leads} ({id_col}, {cols(LEAD_COLUMNS)})")
         run(f"CREATE TABLE IF NOT EXISTS {self.settings_t} (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -248,7 +252,8 @@ class Store:
             have = self._columns(run, table)
             for name, typ in spec:
                 if name not in have:
-                    run(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+                    exists_guard = "IF NOT EXISTS " if self.pg else ""
+                    run(f"ALTER TABLE {table} ADD COLUMN {exists_guard}{name} {typ}")
         run(f"CREATE UNIQUE INDEX IF NOT EXISTS leads_key_idx ON {self.leads} (key)")
         run(f"CREATE INDEX IF NOT EXISTS leads_token_idx ON {self.leads} (report_token)")
         run(f"CREATE INDEX IF NOT EXISTS leads_preview_idx ON {self.leads} (preview_token)")

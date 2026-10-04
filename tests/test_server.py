@@ -338,3 +338,32 @@ def test_reaudit_keeps_status_and_contacted_time(client, store, monkeypatch):
     again = client.post(f"/api/leads/{lead['id']}/refresh").json()
     assert again["status"] == "contacted" and again["contacted_at"] == first["contacted_at"]
     assert again["body"] != "edited"  # an explicit re-audit rewrites the email
+
+
+@pytest.mark.skipif(not PG_URL, reason="set HALA_TEST_PG to test Postgres")
+def test_parallel_cold_starts_dont_collide():
+    """Two instances that both think a column is missing must not fail (Vercel cold starts)."""
+    import threading
+    first = Store(PG_URL)
+    first.check()
+    with first._tx() as run:
+        run(f"ALTER TABLE {first.leads} DROP COLUMN IF EXISTS contacted_at")
+    stores = [Store(PG_URL) for _ in range(4)]
+    for s in stores:  # each sees the column as missing, like a stale check
+        s._columns = lambda run, table: set()
+    errors = []
+
+    def start(s):
+        try:
+            s.check()
+        except Exception as e:
+            errors.append(e)
+    threads = [threading.Thread(target=start, args=(s,)) for s in stores]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    fresh = Store(PG_URL)
+    with fresh._tx() as run:
+        assert "contacted_at" in fresh._columns(run, fresh.leads)
