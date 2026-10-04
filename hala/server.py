@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import threading
 import uuid
 import zipfile
@@ -27,6 +28,22 @@ from .qualify import qualify
 from .report import render_report, slugify
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def public_base_url(default: str = "http://localhost:8000") -> str:
+    """Base URL used in links that leave the app (report links inside emails).
+
+    HALA_PUBLIC_URL wins; on Vercel fall back to the production domain, then the
+    deployment URL. Locally it's the `hala serve` address.
+    """
+    explicit = os.environ.get("HALA_PUBLIC_URL", "").rstrip("/")
+    if explicit:
+        return explicit
+    for var in ("VERCEL_PROJECT_PRODUCTION_URL", "VERCEL_URL"):
+        host = os.environ.get(var, "").strip()
+        if host:
+            return f"https://{host}"
+    return default
 
 
 # --- request bodies --------------------------------------------------------
@@ -182,7 +199,10 @@ def run_search(store: Store, jobs: Jobs, job: dict, req: SearchRequest, local_ba
 
 # --- app -------------------------------------------------------------------
 
-def create_app(store: Store | None = None, local_base: str = "http://localhost:8000") -> FastAPI:
+def create_app(store: Store | None = None, local_base: str | None = None,
+               serve_static: bool = True) -> FastAPI:
+    """Build the API. `serve_static=False` when the UI is deployed separately (Vercel)."""
+    local_base = local_base or public_base_url()
     store = store or Store()
     jobs = Jobs()
     app = FastAPI(title="Hala")
@@ -310,6 +330,8 @@ def create_app(store: Store | None = None, local_base: str = "http://localhost:8
         return Response(buf.getvalue(), media_type="application/zip",
                         headers={"Content-Disposition": "attachment; filename=hala-reports.zip"})
 
+    if not serve_static:
+        return app
     if (STATIC_DIR / "index.html").exists():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     else:

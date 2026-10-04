@@ -10,7 +10,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_PATH = Path(os.environ.get("HALA_DB", Path.home() / ".hala" / "hala.db"))
+# On Vercel only /tmp is writable, and it is wiped between cold starts: data there
+# is NOT durable. Point HALA_DB at persistent storage for a real deployment.
+_FALLBACK = Path("/tmp/hala.db") if os.environ.get("VERCEL") else Path.home() / ".hala" / "hala.db"
+DEFAULT_PATH = Path(os.environ.get("HALA_DB", _FALLBACK))
 
 STATUSES = ("new", "contacted", "replied", "meeting", "won", "lost", "skip")
 
