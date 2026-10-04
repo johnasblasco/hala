@@ -242,3 +242,10 @@ def test_bad_postgres_url_gives_readable_error():
     with pytest.raises(DatabaseUnavailable) as e:
         Store("postgresql://postgres.abc:s3cretpw@127.0.0.1:1/postgres").check()
     assert "Connection refused" in str(e.value) and "s3cretpw" not in str(e.value)
+
+
+def test_supabase_url_suffixes_are_stripped(monkeypatch):
+    for raw in ("https://p.supabase.co/rest/v1/", "https://p.supabase.co/auth/v1", " https://p.supabase.co/ "):
+        monkeypatch.setenv("SUPABASE_URL", raw)
+        monkeypatch.setenv("SUPABASE_ANON_KEY", "k")
+        assert server.auth_config()["url"] == "https://p.supabase.co"

@@ -62,8 +62,17 @@ def public_base_url(default: str = "http://localhost:8000") -> str:
 
 # --- auth ------------------------------------------------------------------
 
+def normalize_supabase_url(raw: str) -> str:
+    """Accept what people paste: 'https://x.supabase.co/rest/v1/' -> 'https://x.supabase.co'."""
+    url = raw.strip().rstrip("/")
+    for suffix in ("/rest/v1", "/auth/v1"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
+
+
 def auth_config() -> dict | None:
-    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    url = normalize_supabase_url(os.environ.get("SUPABASE_URL", ""))
     key = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_PUBLISHABLE_KEY") or ""
     if url and key:
         return {"url": url, "anon_key": key}
