@@ -112,12 +112,13 @@ def cmd_find(args) -> int:
             print("error: set GOOGLE_MAPS_API_KEY, or use --source osm (free)", file=sys.stderr)
             return 1
         search = finder.google_search(key)
-        print(f"searching Google Maps for: {', '.join(args.queries)}", file=sys.stderr)
+        print(f"searching Google Maps for: {', '.join(dict.fromkeys(args.queries))}", file=sys.stderr)
     else:
         search = finder.osm_search()
-        print(f"searching OpenStreetMap (free) for: {', '.join(args.queries)}", file=sys.stderr)
+        print(f"searching OpenStreetMap (free) for: {', '.join(dict.fromkeys(args.queries))}", file=sys.stderr)
     try:
-        with_site, no_site = finder.find_leads(args.queries, search, args.max, args.workers)
+        queries = list(dict.fromkeys(q.strip() for q in args.queries if q.strip()))
+        with_site, no_site = finder.find_leads(queries, search, args.max, args.workers)
     except (RuntimeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

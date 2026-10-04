@@ -30,7 +30,18 @@ FIELD_MASK = ",".join([
     "places.googleMapsUri", "nextPageToken",
 ])
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Public Overpass servers, tried in order. Each has its own load and rate limits.
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+)
+# OSM servers ask for an honest app name with a contact URL, not a browser-like string.
+OSM_HEADERS = {
+    "User-Agent": "Hala/0.1 (website lead finder; https://github.com/johnasblasco/hala)",
+    "Accept": "application/json, */*",
+}
 
 # Plain-language business type -> OpenStreetMap tags.
 OSM_TAGS = {
@@ -200,22 +211,28 @@ def osm_tag_filters(kind: str) -> list[str]:
 
 
 def _get_json(url: str, params: dict) -> object:
-    req = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}",
-                                 headers={"User-Agent": USER_AGENT + " lead-finder"})
+    req = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}", headers=OSM_HEADERS)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
 
-def _overpass(query: str) -> dict:
-    req = urllib.request.Request(
-        OVERPASS_URL, data=urllib.parse.urlencode({"data": query}).encode(),
-        headers={"User-Agent": USER_AGENT + " lead-finder"})
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"OpenStreetMap (Overpass) error {e.code}; it may be busy, "
-                           "try again in a minute") from e
+def _overpass(query: str, _open=None) -> dict:
+    """Run an Overpass query, falling back across public servers."""
+    open_url = _open or urllib.request.urlopen
+    body = urllib.parse.urlencode({"data": query}).encode()
+    errors = []
+    for url in OVERPASS_URLS:
+        req = urllib.request.Request(url, data=body, headers={
+            **OSM_HEADERS, "Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with open_url(req, timeout=90) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            errors.append(f"{urlparse(url).netloc}: HTTP {e.code}")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            errors.append(f"{urlparse(url).netloc}: {e}")
+    raise RuntimeError("all OpenStreetMap servers failed (" + "; ".join(errors) +
+                       "). Try again in a few minutes, or use --source google")
 
 
 def geocode_bbox(place: str, _get=None) -> tuple[float, float, float, float]:

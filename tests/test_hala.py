@@ -221,3 +221,31 @@ def test_find_defaults_to_free_osm(tmp_path, monkeypatch):
     assert main(["find", "dentist in QC", "--out", str(out)]) == 0
     rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
     assert rows[0]["email"] == "hi@smile.ph"
+
+
+def test_overpass_falls_back_to_next_server():
+    import io
+    import urllib.error
+    from hala import find as finder
+    tried = []
+
+    def fake_open(req, timeout=0):
+        tried.append(req.full_url)
+        assert "Mozilla" not in req.get_header("User-agent")
+        if len(tried) == 1:
+            raise urllib.error.HTTPError(req.full_url, 406, "Not Acceptable", {}, io.BytesIO(b""))
+        return io.BytesIO(b'{"elements": []}')
+    assert finder._overpass("[out:json];", _open=fake_open) == {"elements": []}
+    assert tried[0] == finder.OVERPASS_URLS[0] and tried[1] == finder.OVERPASS_URLS[1]
+
+
+def test_overpass_all_fail_message():
+    import io
+    import urllib.error
+    import pytest
+    from hala import find as finder
+
+    def fake_open(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 406, "x", {}, io.BytesIO(b""))
+    with pytest.raises(RuntimeError, match="overpass-api.de: HTTP 406"):
+        finder._overpass("q", _open=fake_open)
