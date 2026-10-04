@@ -129,7 +129,7 @@ def test_status_updates_and_repeat_search_keeps_user_work(client, monkeypatch):
 
 
 def test_settings_hide_secrets(client):
-    r = client.put("/api/settings", json={"sender_name": "Johnas", "anthropic_api_key": "sk-ant-secret"})
+    r = client.put("/api/settings", json={"sender_name": "Johnas", "anthropic_api_key": "sk-ant-secret-0123456789abcdefghijklmnop"})
     body = r.json()
     assert body["sender_name"] == "Johnas"
     assert body["anthropic_api_key_set"] is True and "sk-ant-secret" not in r.text
@@ -274,7 +274,7 @@ def test_ai_provider_settings_and_test_button(client, monkeypatch):
     s = client.get("/api/settings").json()
     assert s["ai_provider"] == "anthropic" and any(p["id"] == "gemini" for p in s["ai_providers"])
     assert client.put("/api/settings", json={"ai_provider": "skynet"}).status_code == 400
-    r = client.put("/api/settings", json={"ai_provider": "gemini", "gemini_api_key": "AIza-secret"})
+    r = client.put("/api/settings", json={"ai_provider": "gemini", "gemini_api_key": "AIza-secret-0123456789abcdefghijkl"})
     assert r.json()["gemini_api_key_set"] is True and "AIza-secret" not in r.text
 
     from hala import ai
@@ -309,8 +309,14 @@ def test_autofilled_passwords_are_rejected(client):
     r = client.put("/api/settings", json={"google_api_key": "MyPassw0rd!"})
     assert r.status_code == 400 and "autofill" in r.json()["detail"]
     assert not client.get("/api/settings").json()["google_api_key_set"]
-    ok = client.put("/api/settings", json={"google_api_key": "  AIzaSyD-real-key  ", "groq_api_key": "gsk_abc"})
+    ok = client.put("/api/settings", json={"google_api_key": "  AIzaSyD-0123456789abcdefghijklmnopqrst  ",
+                                           "groq_api_key": "gsk_" + "x" * 52})
     assert ok.status_code == 200 and ok.json()["google_api_key_set"] and ok.json()["groq_api_key_set"]
+    # newer Google key format (not AIza...) must be accepted
+    new_fmt = client.put("/api/settings", json={"gemini_api_key": "AQ." + "Ab8RN6Kk" * 6})
+    assert new_fmt.status_code == 200 and new_fmt.json()["gemini_api_key_set"]
+    # local servers may use short or no keys
+    assert client.put("/api/settings", json={"custom_api_key": "ollama"}).status_code == 200
 
 
 def test_contacted_at_and_follow_ups(client, store):

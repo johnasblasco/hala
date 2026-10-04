@@ -193,14 +193,22 @@ class SettingsPatch(BaseModel):
     daily_send_limit: str | None = None
 
 
-# Key formats that have been stable for years. Catches browser-autofilled passwords.
-KEY_FORMATS = {
-    "google_api_key": ("AIza", "Google API key"),
-    "gemini_api_key": ("AIza", "Gemini API key"),
-    "groq_api_key": ("gsk_", "Groq API key"),
-    "anthropic_api_key": ("sk-ant-", "Anthropic API key"),
-    "openrouter_api_key": ("sk-or-", "OpenRouter API key"),
+# Catches browser-autofilled passwords without betting on key prefixes (providers
+# change formats: Gemini keys went from "AIza..." to "AQ..."). Real API keys are
+# long and have no spaces; passwords are short. Custom servers (Ollama) are exempt.
+API_KEY_LABELS = {
+    "google_api_key": "Google Maps API key",
+    "gemini_api_key": "Gemini API key",
+    "groq_api_key": "Groq API key",
+    "anthropic_api_key": "Anthropic API key",
+    "openrouter_api_key": "OpenRouter API key",
+    "openai_api_key": "OpenAI API key",
 }
+MIN_API_KEY_LENGTH = 30
+
+
+def looks_like_api_key(value: str) -> bool:
+    return len(value) >= MIN_API_KEY_LENGTH and not any(c.isspace() for c in value)
 
 
 # --- pipeline --------------------------------------------------------------
@@ -390,10 +398,11 @@ def create_app(store: Store | None = None, local_base: str | None = None,
                                      "(did your browser autofill it?).")
         if pw:
             values["smtp_password"] = pw.replace(" ", "")
-        for k, (prefix, label) in KEY_FORMATS.items():
-            if values.get(k) and not values[k].startswith(prefix):
-                raise HTTPException(400, f"That doesn't look like a {label} (they start with "
-                                         f"\"{prefix}\"). Did your browser autofill a saved password?")
+        for k, label in API_KEY_LABELS.items():
+            if values.get(k) and not looks_like_api_key(values[k]):
+                raise HTTPException(400, f"That doesn't look like a {label}: keys are long (30+ "
+                                         "characters) with no spaces. Did your browser autofill a "
+                                         "saved password? Copy the key again from the provider.")
         if "ai_provider" in values and values["ai_provider"] not in ai.PROVIDERS:
             raise HTTPException(400, "unknown AI provider")
         for k in SECRET_KEYS:
