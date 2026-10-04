@@ -175,3 +175,49 @@ def test_find_command_splits_no_website(tmp_path, monkeypatch):
     assert rows[0]["reviews"] == "200" and rows[0]["category"] == "Dentist"
     nosite = list(csv.DictReader(open(tmp_path / "leads-no-website.csv", encoding="utf-8-sig")))
     assert nosite[0]["name"] == "No Site Dental"
+
+
+def test_split_query_and_tags():
+    from hala.find import osm_tag_filters, split_query
+    assert split_query("dentists in Quezon City") == ("dentists", "Quezon City")
+    assert '["amenity"="dentist"]' in osm_tag_filters("dentists")
+    assert osm_tag_filters("tattoo")[0].startswith('["name"~"tattoo",i]')
+
+
+def test_osm_search_builds_leads(monkeypatch):
+    from hala import find as finder
+    monkeypatch.setattr(finder.time, "sleep", lambda s: None)
+    sent = {}
+
+    def fake_overpass(q):
+        sent["q"] = q
+        return {"elements": [
+            {"type": "node", "id": 1, "lat": 14.6, "lon": 121.0,
+             "tags": {"name": "Smile Dental", "amenity": "dentist", "website": "smile.ph",
+                      "phone": "+63 2 8123 4567", "addr:street": "Katipunan Ave"}},
+            {"type": "way", "id": 2, "center": {"lat": 14.6, "lon": 121.0},
+             "tags": {"name": "Tooth Co", "amenity": "dentist", "contact:email": "hi@tooth.ph"}},
+            {"type": "node", "id": 3, "tags": {"amenity": "dentist"}},  # no name: dropped
+        ]}
+    search = finder.osm_search(_overpass_fn=fake_overpass, _geocode=lambda p: (14.5, 120.9, 14.8, 121.2))
+    leads = search("dentist in Quezon City", 60)
+    assert '["amenity"="dentist"](14.5,120.9,14.8,121.2)' in sent["q"]
+    assert [l["name"] for l in leads] == ["Smile Dental", "Tooth Co"]
+    assert leads[0]["website"] == "http://smile.ph" and leads[0]["city"] == "Quezon City"
+    assert leads[1]["email"] == "hi@tooth.ph"
+    assert leads[0]["maps_url"] == "https://www.openstreetmap.org/node/1"
+
+
+def test_find_defaults_to_free_osm(tmp_path, monkeypatch):
+    from hala import find as finder
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+    lead = {"name": "Smile", "email": "", "website": "http://smile.ph", "category": "dentist",
+            "city": "QC", "reviews": "", "rating": "", "runs_ads": "", "phone": "",
+            "address": "", "maps_url": ""}
+    monkeypatch.setattr(finder, "osm_search", lambda: (lambda q, m: [dict(lead)]))
+    monkeypatch.setattr(finder, "find_email", lambda url: "hi@smile.ph")
+    out = tmp_path / "leads.csv"
+    assert main(["find", "dentist in QC", "--out", str(out)]) == 0
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    assert rows[0]["email"] == "hi@smile.ph"

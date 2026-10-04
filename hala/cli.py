@@ -103,15 +103,22 @@ def cmd_run(args) -> int:
 
 
 def cmd_find(args) -> int:
-    key = finder.api_key_from_env()
-    if not key:
-        print("error: set GOOGLE_MAPS_API_KEY (see README: 'Finding leads automatically')",
-              file=sys.stderr)
-        return 1
-    print(f"searching Google Maps for: {', '.join(args.queries)}", file=sys.stderr)
+    source = args.source
+    if source == "auto":
+        source = "google" if finder.api_key_from_env() else "osm"
+    if source == "google":
+        key = finder.api_key_from_env()
+        if not key:
+            print("error: set GOOGLE_MAPS_API_KEY, or use --source osm (free)", file=sys.stderr)
+            return 1
+        search = finder.google_search(key)
+        print(f"searching Google Maps for: {', '.join(args.queries)}", file=sys.stderr)
+    else:
+        search = finder.osm_search()
+        print(f"searching OpenStreetMap (free) for: {', '.join(args.queries)}", file=sys.stderr)
     try:
-        with_site, no_site = finder.find_leads(args.queries, key, args.max, args.workers)
-    except RuntimeError as e:
+        with_site, no_site = finder.find_leads(args.queries, search, args.max, args.workers)
+    except (RuntimeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     finder.write_leads(args.out, with_site)
@@ -151,7 +158,10 @@ def main(argv=None) -> int:
     f = sub.add_parser("find", help="find leads on Google Maps and look up their emails")
     f.add_argument("queries", nargs="+", help='e.g. "dentist in Quezon City" "dentist in Makati"')
     f.add_argument("--out", default="leads.csv")
-    f.add_argument("--max", type=int, default=60, help="max businesses per search (Google allows 60)")
+    f.add_argument("--source", choices=["auto", "osm", "google"], default="auto",
+                   help="osm = free OpenStreetMap; google = Places API (needs key); "
+                        "auto = google if GOOGLE_MAPS_API_KEY is set, else osm")
+    f.add_argument("--max", type=int, default=60, help="max businesses per search (Google caps at 60)")
     f.add_argument("--workers", type=int, default=8)
     f.add_argument("--run", action="store_true", help="run the full pipeline right after")
     f.add_argument("--run-out", default="out", help="output folder when using --run")
