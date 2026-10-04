@@ -216,3 +216,29 @@ def test_verify_token_caches(monkeypatch):
     assert server.verify_token(tok, cfg) == "johnas@example.com"
     assert server.verify_token(tok, cfg) == "johnas@example.com"
     assert calls == ["https://p.supabase.co/auth/v1/user"]
+
+
+def test_config_and_health_work_when_database_is_down(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://p.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("HALA_ALLOWED_EMAILS", "a@b.c")
+    monkeypatch.setattr(server, "verify_token", lambda t, c: "a@b.c")
+    c = TestClient(server.create_app())  # must not crash at startup
+    assert c.get("/api/config").status_code == 200
+    h = c.get("/api/health").json()
+    assert "DATABASE_URL isn't set" in h["database"] and h["login"] == "on"
+    r = c.get("/api/stats", headers={"Authorization": "Bearer x"})
+    assert r.status_code == 503 and "DATABASE_URL" in r.json()["detail"]
+
+
+def test_bad_postgres_url_gives_readable_error():
+    from hala.db import DatabaseUnavailable
+    s = Store("postgresql://postgres.abc:[YOUR-PASSWORD]@127.0.0.1:1/postgres")  # nothing listens
+    with pytest.raises(DatabaseUnavailable) as e:
+        s.check()
+    assert "still contains [YOUR-PASSWORD]" in str(e.value)
+    with pytest.raises(DatabaseUnavailable) as e:
+        Store("postgresql://postgres.abc:s3cretpw@127.0.0.1:1/postgres").check()
+    assert "Connection refused" in str(e.value) and "s3cretpw" not in str(e.value)

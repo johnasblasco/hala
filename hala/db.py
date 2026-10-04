@@ -20,6 +20,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 DEFAULT_PATH = Path(os.environ.get("HALA_DB", Path.home() / ".hala" / "hala.db"))
 
@@ -100,6 +101,42 @@ def lead_key(name: str, address: str, website: str = "") -> str:
     return "|".join(x.strip().lower() for x in (name, address or website))
 
 
+class DatabaseUnavailable(RuntimeError):
+    """The database can't be reached. The message says what to fix (never contains secrets)."""
+
+
+def _explain(err: Exception, pg: bool, target: str = "") -> str:
+    text = str(err).lower()
+    if "[your-password]" in target.lower():
+        return ("DATABASE_URL still contains [YOUR-PASSWORD]. Replace it (including the brackets) "
+                "with your Supabase database password.")
+    if not pg:
+        return f"Couldn't open the local database file ({err})."
+    if "password authentication failed" in text or "[your-password]" in text:
+        return ("Supabase rejected the database password. Check the password inside DATABASE_URL "
+                "(replace [YOUR-PASSWORD] with your real database password).")
+    if "network is unreachable" in text or "cannot assign requested address" in text or (
+            "db." in text and ".supabase.co" in text):
+        return ("Can't reach Supabase's direct database address (it's IPv6-only, which Vercel "
+                "doesn't support). Use the Transaction pooler connection string instead "
+                "(host ...pooler.supabase.com, port 6543).")
+    if "tenant or user not found" in text:
+        return ("Supabase's pooler doesn't recognise the user. In the pooler connection string the "
+                "user looks like postgres.<project-ref>, copy it again from Supabase → Connect.")
+    if "timeout" in text or "timed out" in text:
+        return "Timed out connecting to the database. Check the host and port in DATABASE_URL."
+    if "could not translate host name" in text or "name or service not known" in text:
+        return "The database host name in DATABASE_URL doesn't exist. Copy it again from Supabase."
+    reason = (str(err).strip().splitlines() or [type(err).__name__])[0][:200]
+    try:
+        password = urlparse(target).password if target else None
+    except ValueError:
+        password = None
+    if password:
+        reason = reason.replace(password, "***")
+    return f"Couldn't connect to the database ({reason}). Check DATABASE_URL."
+
+
 def _is_postgres(target: str) -> bool:
     return target.startswith(("postgres://", "postgresql://"))
 
@@ -115,13 +152,26 @@ class Store:
         prefix = "hala." if self.pg else ""
         self.leads, self.settings_t, self.jobs = (f"{prefix}leads", f"{prefix}settings",
                                                   f"{prefix}jobs")
-        if not self.pg and target != ":memory:":
-            Path(target).parent.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        self._ready = False  # connect + create tables lazily, on first use
+
+    @property
+    def configured(self) -> bool:
+        """False on Vercel without DATABASE_URL (the filesystem there is temporary)."""
+        return self.pg or not os.environ.get("VERCEL")
+
+    def check(self) -> None:
+        """Connect now; raises DatabaseUnavailable with a readable reason."""
+        with self._tx() as run:
+            run("SELECT 1")
 
     # --- connection --------------------------------------------------------
 
     def _connect(self):
+        if not self.configured:
+            raise DatabaseUnavailable("DATABASE_URL isn't set. Add your Supabase Transaction pooler "
+                                      "connection string in Vercel → Settings → Environment Variables.")
+        if not self.pg and self.target != ":memory:":
+            Path(self.target).parent.mkdir(parents=True, exist_ok=True)
         if self.pg:
             import psycopg
             from psycopg.rows import dict_row
@@ -138,7 +188,12 @@ class Store:
         """Yield an `exec(sql, args)` function; SQL uses `?` placeholders on both backends."""
         with self._lock:
             if self._conn is None or (self.pg and (self._conn.closed or self._conn.broken)):
-                self._conn = self._connect()
+                try:
+                    self._conn = self._connect()
+                except DatabaseUnavailable:
+                    raise
+                except Exception as e:
+                    raise DatabaseUnavailable(_explain(e, self.pg, self.target)) from e
             conn = self._conn
 
             def run(sql: str, args=()):
@@ -147,6 +202,19 @@ class Store:
                 cur = conn.cursor()
                 cur.execute(sql, tuple(args))
                 return cur
+
+            if not self._ready:
+                try:
+                    self._migrate(run)
+                    conn.commit()
+                    self._ready = True
+                except Exception as e:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        self._conn = None
+                    raise DatabaseUnavailable(
+                        f"Connected, but couldn't set up Hala's tables: {e}") from e
 
             try:
                 yield run
@@ -158,30 +226,29 @@ class Store:
                     self._conn = None  # connection is gone; reconnect next time
                 raise
 
-    def _migrate(self) -> None:
+    def _migrate(self, run) -> None:
         id_col = ("id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" if self.pg
                   else "id INTEGER PRIMARY KEY AUTOINCREMENT")
         cols = lambda spec: ", ".join(f"{n} {t}" for n, t in spec)  # noqa: E731
-        with self._tx() as run:
-            if self.pg:
-                run("CREATE SCHEMA IF NOT EXISTS hala")
-            run(f"CREATE TABLE IF NOT EXISTS {self.leads} ({id_col}, {cols(LEAD_COLUMNS)})")
-            run(f"CREATE TABLE IF NOT EXISTS {self.settings_t} (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            run(f"CREATE TABLE IF NOT EXISTS {self.jobs} (id TEXT PRIMARY KEY, {cols(JOB_COLUMNS)})")
-            for table, spec in ((self.leads, LEAD_COLUMNS), (self.jobs, JOB_COLUMNS)):
-                have = self._columns(run, table)
-                for name, typ in spec:
-                    if name not in have:
-                        run(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
-            run(f"CREATE UNIQUE INDEX IF NOT EXISTS leads_key_idx ON {self.leads} (key)")
-            run(f"CREATE INDEX IF NOT EXISTS leads_token_idx ON {self.leads} (report_token)")
-            if self.pg:
-                for t in (self.leads, self.settings_t, self.jobs):
-                    run(f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY")
-            missing = run(f"SELECT id FROM {self.leads} WHERE report_token = ''").fetchall()
-            for r in missing:
-                run(f"UPDATE {self.leads} SET report_token = ? WHERE id = ?",
-                    (secrets.token_urlsafe(12), r["id"]))
+        if self.pg:
+            run("CREATE SCHEMA IF NOT EXISTS hala")
+        run(f"CREATE TABLE IF NOT EXISTS {self.leads} ({id_col}, {cols(LEAD_COLUMNS)})")
+        run(f"CREATE TABLE IF NOT EXISTS {self.settings_t} (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        run(f"CREATE TABLE IF NOT EXISTS {self.jobs} (id TEXT PRIMARY KEY, {cols(JOB_COLUMNS)})")
+        for table, spec in ((self.leads, LEAD_COLUMNS), (self.jobs, JOB_COLUMNS)):
+            have = self._columns(run, table)
+            for name, typ in spec:
+                if name not in have:
+                    run(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+        run(f"CREATE UNIQUE INDEX IF NOT EXISTS leads_key_idx ON {self.leads} (key)")
+        run(f"CREATE INDEX IF NOT EXISTS leads_token_idx ON {self.leads} (report_token)")
+        if self.pg:
+            for t in (self.leads, self.settings_t, self.jobs):
+                run(f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY")
+        missing = run(f"SELECT id FROM {self.leads} WHERE report_token = ''").fetchall()
+        for r in missing:
+            run(f"UPDATE {self.leads} SET report_token = ? WHERE id = ?",
+                (secrets.token_urlsafe(12), r["id"]))
 
     def _columns(self, run, table: str) -> set[str]:
         if self.pg:

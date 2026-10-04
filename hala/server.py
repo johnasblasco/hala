@@ -28,13 +28,13 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import find as finder
 from .audit import audit
-from .db import SECRET_KEYS, STATUSES, Store
+from .db import SECRET_KEYS, STATUSES, DatabaseUnavailable, Store
 from .pitch import no_website_message, write_pitch
 from .qualify import qualify
 from .report import render_report, slugify
@@ -292,6 +292,27 @@ def create_app(store: Store | None = None, local_base: str | None = None,
     app = FastAPI(title="Hala")
     app.state.store = store
     api = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
+
+    @app.exception_handler(DatabaseUnavailable)
+    def db_unavailable(_request: Request, exc: DatabaseUnavailable):
+        return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.get("/api/health")
+    def health():
+        """Public setup check: what's configured and whether the database answers.
+        Never includes secrets."""
+        try:
+            store.check()
+            database = "ok"
+        except DatabaseUnavailable as e:
+            database = str(e)
+        return {
+            "database": database,
+            "database_kind": "postgres" if store.pg else "sqlite",
+            "login": "on" if auth_config() else "off",
+            "allowed_emails": len(allowed_emails()),
+            "public_url": public_base_url(),
+        }
 
     @app.get("/api/config")
     def config():

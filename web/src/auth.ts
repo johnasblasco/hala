@@ -12,7 +12,11 @@ export interface AuthConfig {
 
 export async function loadAuthConfig(): Promise<AuthConfig | null> {
   const res = await fetch("/api/config");
-  if (!res.ok) throw new Error(`Couldn't reach the server (${res.status})`);
+  if (!res.ok) {
+    throw new Error(
+      `The server isn't working (error ${res.status}). Open /api/health on this site to see what's wrong.`,
+    );
+  }
   const cfg = (await res.json()).auth as AuthConfig | null;
   if (cfg && !client) client = createClient(cfg.supabase_url, cfg.anon_key);
   return cfg;
