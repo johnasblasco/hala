@@ -13,7 +13,7 @@ import re
 from html import escape
 from urllib.parse import quote_plus, urlparse
 
-from .pitch import MODEL
+from .ai import AnthropicWriter, Writer
 
 LANGUAGES = ("English", "Filipino", "Taglish")
 
@@ -175,10 +175,8 @@ def default_content(lead: dict, notes: str = "") -> dict:
     }
 
 
-def claude_content(lead: dict, notes: str, language: str, client) -> dict | None:
-    """Ask Claude for the page text. Returns None if Claude is unavailable or declines."""
-    import anthropic
-
+def ai_content(lead: dict, notes: str, language: str, writer: Writer) -> dict | None:
+    """Ask the AI provider for the page text. Returns None if it fails or declines."""
     kind = business_type(lead)
     facts = {
         "business_name": lead.get("name"),
@@ -191,28 +189,14 @@ def claude_content(lead: dict, notes: str, language: str, client) -> dict | None
         "typical_services_hint": DEFAULTS.get(kind, (None, None))[1],
         "language": language if language in LANGUAGES else "English",
     }
-    try:
-        response = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            system=SYSTEM,
-            output_config={"effort": "low",
-                           "format": {"type": "json_schema", "schema": CONTENT_SCHEMA}},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            messages=[{"role": "user", "content": json.dumps(facts, ensure_ascii=False)}],
-        )
-    except anthropic.APIError:
-        return None
-    if response.stop_reason in ("refusal", "max_tokens"):
-        return None
-    try:
-        data = json.loads("".join(b.text for b in response.content if b.type == "text"))
-    except ValueError:
-        return None
-    if not data.get("services"):
+    data = writer.generate(SYSTEM, json.dumps(facts, ensure_ascii=False), CONTENT_SCHEMA, "low")
+    if not data or not data.get("services"):
         return None
     return data
+
+
+def claude_content(lead: dict, notes: str, language: str, client) -> dict | None:
+    return ai_content(lead, notes, language, AnthropicWriter(client=client))
 
 
 # --- page ------------------------------------------------------------------
@@ -345,9 +329,12 @@ footer{{padding:28px 0;color:var(--mute);font-size:14px;text-align:center}}
 
 
 def build_preview(lead: dict, sender: dict, notes: str = "", photos: list[str] | None = None,
-                  facebook_url: str = "", language: str = "English", client=None) -> tuple[str, str]:
-    """Return (html, source) where source is 'claude' or 'template'."""
-    content = claude_content(lead, notes, language, client) if client is not None else None
-    source = "claude" if content else "template"
+                  facebook_url: str = "", language: str = "English", client=None,
+                  writer: Writer | None = None) -> tuple[str, str]:
+    """Return (html, source) where source is the AI provider name or 'template'."""
+    if writer is None and client is not None:
+        writer = AnthropicWriter(client=client)
+    content = ai_content(lead, notes, language, writer) if writer is not None else None
+    source = writer.name if content else "template"
     content = content or default_content(lead, notes)
     return render_preview(lead, content, sender, photos, facebook_url), source

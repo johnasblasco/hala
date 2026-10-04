@@ -1,7 +1,7 @@
 """Outreach copy: one short, specific, compliant email per qualified lead.
 
-Uses Claude when an API credential is available and falls back to a
-deterministic template otherwise. The compliance footer (sender identity,
+Uses the configured AI provider (Claude by default; see ai.py) and falls back
+to a deterministic template otherwise. The compliance footer (sender identity,
 address, opt-out) is always appended in code and never left to the model.
 """
 
@@ -11,9 +11,9 @@ import json
 import os
 from dataclasses import dataclass
 
+from .ai import ANTHROPIC_MODEL as MODEL
+from .ai import AnthropicWriter, Writer
 from .audit import AuditResult
-
-MODEL = "claude-opus-5-5"
 
 SYSTEM = """You write cold emails for a small web studio that rebuilds websites for local businesses.
 
@@ -44,7 +44,7 @@ class Pitch:
     subject: str
     body: str
     angle: str
-    source: str  # "claude" or "template"
+    source: str  # provider name (e.g. "claude", "gemini") or "template"
 
 
 def compliance_footer(sender: dict) -> str:
@@ -74,11 +74,8 @@ def _has_credentials() -> bool:
                ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"))
 
 
-def claude_pitch(lead: dict, audit: AuditResult, report_url: str, client=None) -> Pitch | None:
-    """Return a Claude-written pitch, or None if Claude is unavailable or declines."""
-    import anthropic
-
-    client = client or anthropic.Anthropic()
+def ai_pitch(lead: dict, audit: AuditResult, report_url: str, writer: Writer) -> Pitch | None:
+    """Return an AI-written pitch, or None if the provider fails or declines."""
     facts = {
         "business": lead.get("name"),
         "category": lead.get("category"),
@@ -89,34 +86,24 @@ def claude_pitch(lead: dict, audit: AuditResult, report_url: str, client=None) -
         "findings": [{"title": f.title, "detail": f.detail, "impact": f.impact}
                      for f in audit.findings[:4]],
     }
-    try:
-        response = client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            system=SYSTEM,
-            output_config={"effort": "medium",
-                           "format": {"type": "json_schema", "schema": PITCH_SCHEMA}},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            messages=[{"role": "user", "content": json.dumps(facts, ensure_ascii=False)}],
-        )
-    except anthropic.APIError:
+    data = writer.generate(SYSTEM, json.dumps(facts, ensure_ascii=False), PITCH_SCHEMA, "medium")
+    if not data:
         return None
-    if response.stop_reason in ("refusal", "max_tokens"):
-        return None
-    text = "".join(b.text for b in response.content if b.type == "text")
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    return Pitch(subject=data["subject"], body=data["body"], angle=data["angle"], source="claude")
+    return Pitch(subject=data["subject"], body=data["body"], angle=data["angle"], source=writer.name)
+
+
+def claude_pitch(lead: dict, audit: AuditResult, report_url: str, client=None) -> Pitch | None:
+    """Claude-written pitch (CLI default, uses ANTHROPIC_API_KEY when no client is given)."""
+    return ai_pitch(lead, audit, report_url, AnthropicWriter(client=client))
 
 
 def write_pitch(lead: dict, audit: AuditResult, report_url: str, sender: dict,
-                use_claude: bool = True, client=None) -> Pitch:
-    """Write the email. Pass `client` (an anthropic.Anthropic) to use a specific key."""
+                use_claude: bool = True, client=None, writer: Writer | None = None) -> Pitch:
+    """Write the email with `writer` if given, else Claude (CLI), else the template."""
     pitch = None
-    if use_claude and (client is not None or _has_credentials()):
+    if writer is not None:
+        pitch = ai_pitch(lead, audit, report_url, writer)
+    elif use_claude and (client is not None or _has_credentials()):
         pitch = claude_pitch(lead, audit, report_url, client=client)
     pitch = pitch or template_pitch(lead, audit, report_url)
     pitch.body = f"{pitch.body.rstrip()}\n\n{compliance_footer(sender)}"

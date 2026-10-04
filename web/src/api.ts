@@ -59,6 +59,10 @@ export const api = {
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (values: Record<string, string>) =>
     request<Settings>("/api/settings", { method: "PUT", body: json(values) }),
+  testAI: () =>
+    request<{ ok: boolean; message: string; provider?: string; model?: string }>("/api/settings/test-ai", {
+      method: "POST",
+    }),
   clearSecret: (key: string) => request<Settings>(`/api/settings/${key}`, { method: "DELETE" }),
 };
 

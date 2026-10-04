@@ -92,9 +92,12 @@ DATA_FIELDS = ("name", "email", "website", "phone", "category", "city", "address
 PITCH_FIELDS = ("subject", "body", "angle", "pitch_source", "message")
 EDITABLE_FIELDS = ("status", "notes", "subject", "body", "message", "email", "phone")
 
+AI_KEY_SETTINGS = ("anthropic_api_key", "gemini_api_key", "groq_api_key", "openrouter_api_key",
+                   "openai_api_key", "custom_api_key")
 SETTING_KEYS = ("sender_name", "sender_company", "sender_email", "sender_address",
-                "report_base_url", "google_api_key", "anthropic_api_key", "use_ai")
-SECRET_KEYS = ("google_api_key", "anthropic_api_key")
+                "report_base_url", "google_api_key", "use_ai", "ai_provider", "ai_model",
+                "ai_base_url", *AI_KEY_SETTINGS)
+SECRET_KEYS = ("google_api_key", *AI_KEY_SETTINGS)
 
 
 def _now() -> str:
@@ -450,9 +453,22 @@ class Store:
             "report_base_url": os.environ.get("HALA_REPORT_BASE_URL", ""),
             "google_api_key": os.environ.get("GOOGLE_MAPS_API_KEY", ""),
             "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
+            "gemini_api_key": os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", ""),
+            "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
+            "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY", ""),
+            "openai_api_key": os.environ.get("OPENAI_API_KEY", ""),
+            "custom_api_key": os.environ.get("HALA_AI_API_KEY", ""),
+            "ai_provider": os.environ.get("HALA_AI_PROVIDER", ""),
+            "ai_model": os.environ.get("HALA_AI_MODEL", ""),
+            "ai_base_url": os.environ.get("HALA_AI_BASE_URL", ""),
             "use_ai": "1",
         }
-        return {k: stored.get(k) or env.get(k, "") for k in SETTING_KEYS}
+        out = {k: stored.get(k) or env.get(k, "") for k in SETTING_KEYS}
+        if not out["ai_provider"]:
+            # Default to whichever provider has a key, preferring Claude.
+            with_key = [k[: -len("_api_key")] for k in AI_KEY_SETTINGS if out[k]]
+            out["ai_provider"] = with_key[0] if with_key else "anthropic"
+        return out
 
     def save_settings(self, values: dict) -> None:
         with self._tx() as run:

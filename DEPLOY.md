@@ -39,7 +39,8 @@ can't read them. Only the server's database connection can.
    | `SUPABASE_URL` | `https://<project>.supabase.co` | yes |
    | `SUPABASE_ANON_KEY` | anon / publishable key | yes |
    | `HALA_ALLOWED_EMAILS` | `you@gmail.com,partner@gmail.com` | yes |
-   | `ANTHROPIC_API_KEY` | Claude key, for AI-written emails | no |
+   | `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OPENAI_API_KEY` | AI writing for emails and previews (or paste the key in Settings) | no |
+   | `HALA_AI_PROVIDER` | `anthropic`, `gemini`, `groq`, `openrouter`, `openai` or `custom` (else the one with a key) | no |
    | `GOOGLE_MAPS_API_KEY` | for bigger lead lists | no |
    | `HALA_PUBLIC_URL` | your custom domain, e.g. `https://app.yourstudio.com` | no |
 

@@ -8,7 +8,7 @@ const FIELDS = [
   { key: "sender_company", label: "Studio / company", placeholder: "Hala Web Studio" },
   { key: "sender_email", label: "Your email", placeholder: "you@yourstudio.com" },
   { key: "sender_address", label: "Business address", placeholder: "Malolos, Bulacan, Philippines", hint: "Anti-spam laws require an address in every cold email." },
-  { key: "report_base_url", label: "Public report URL", placeholder: "https://hala-reports.pages.dev", hint: "Where you upload the downloaded reports (e.g. Cloudflare Pages). Email links use this." },
+  { key: "report_base_url", label: "External report URL (optional)", placeholder: "Leave blank", hint: "Leave blank: report links use this Hala site. Only fill this in if you host the downloaded reports somewhere else." },
 ] as const;
 
 export default function SettingsPage() {
@@ -16,6 +16,8 @@ export default function SettingsPage() {
   const [form, setForm] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [test, setTest] = useState<{ ok: boolean; message: string; provider?: string; model?: string } | null>(null);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     api.settings().then(load).catch((e) => setError(e.message));
@@ -30,9 +32,26 @@ export default function SettingsPage() {
       sender_address: s.sender_address,
       report_base_url: s.report_base_url,
       use_ai: s.use_ai,
+      ai_provider: s.ai_provider,
+      ai_model: s.ai_model,
+      ai_base_url: s.ai_base_url,
       google_api_key: "",
-      anthropic_api_key: "",
+      ...Object.fromEntries(s.ai_providers.map((p) => [`${p.id}_api_key`, ""])),
     });
+  }
+
+  async function testAI() {
+    setTesting(true);
+    setTest(null);
+    setError(null);
+    try {
+      load(await api.saveSettings(form)); // test what's on screen, saved
+      setTest(await api.testAI());
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function save(e: React.FormEvent) {
@@ -58,7 +77,7 @@ export default function SettingsPage() {
       <header className="page-head">
         <div>
           <h1>Settings</h1>
-          <p className="muted">Stored only on this computer.</p>
+          <p className="muted">Saved in your Hala database. Keys are never shown again after saving.</p>
         </div>
       </header>
 
@@ -76,7 +95,7 @@ export default function SettingsPage() {
           </label>
         ))}
 
-        <h2>API keys (optional)</h2>
+        <h2>Lead search (optional)</h2>
         <SecretField
           label="Google Maps API key"
           hint="Bigger lead lists with reviews and ratings. Without it, Hala uses OpenStreetMap for free."
@@ -85,22 +104,34 @@ export default function SettingsPage() {
           onChange={(v) => setForm({ ...form, google_api_key: v })}
           onClear={() => clear("google_api_key")}
         />
-        <SecretField
-          label="Anthropic API key"
-          hint="Lets Claude write a custom email for each lead. Without it, a template is used."
-          isSet={settings.anthropic_api_key_set}
-          value={form.anthropic_api_key}
-          onChange={(v) => setForm({ ...form, anthropic_api_key: v })}
-          onClear={() => clear("anthropic_api_key")}
-        />
+
+        <h2>AI writing (optional)</h2>
+        <p className="muted small" style={{ marginTop: -8 }}>
+          Writes each email and website preview. Without AI, Hala uses good templates, so this is optional.
+        </p>
         <label className="toggle">
           <input
             type="checkbox"
             checked={form.use_ai === "1"}
             onChange={(e) => setForm({ ...form, use_ai: e.target.checked ? "1" : "0" })}
           />
-          <span>Use Claude to write emails when a key is set</span>
+          <span>Use AI to write emails and previews</span>
         </label>
+        {form.use_ai === "1" && (
+          <AISettings settings={settings} form={form} setForm={setForm} clear={clear} />
+        )}
+        {form.use_ai === "1" && (
+          <div className="actions">
+            <button type="button" className="btn" onClick={testAI} disabled={testing}>
+              {testing ? "Testing…" : "Save & test AI"}
+            </button>
+            {test && (
+              <span className={`test-result ${test.ok ? "ok-text" : "error-text"}`}>
+                {test.ok ? `✓ Works (${test.provider}, ${test.model}): “${test.message}”` : `✗ ${test.message}`}
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="actions">
           <button className="btn btn-primary">Save settings</button>
@@ -111,6 +142,93 @@ export default function SettingsPage() {
     </div>
   );
 }
+
+function AISettings({
+  settings,
+  form,
+  setForm,
+  clear,
+}: {
+  settings: Settings;
+  form: Record<string, string>;
+  setForm: (f: Record<string, string>) => void;
+  clear: (key: string) => void;
+}) {
+  const provider = settings.ai_providers.find((p) => p.id === form.ai_provider) ?? settings.ai_providers[0];
+  const keyName = `${provider.id}_api_key` as `${string}_api_key`;
+  const isCustom = provider.id === "custom";
+  return (
+    <>
+      <label>
+        <span>AI provider</span>
+        <select
+          value={provider.id}
+          onChange={(e) => setForm({ ...form, ai_provider: e.target.value, ai_model: "" })}
+        >
+          {settings.ai_providers.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+              {settings[`${p.id}_api_key_set`] ? " ✓" : ""}
+            </option>
+          ))}
+        </select>
+        <small className="muted">
+          {PROVIDER_HINTS[provider.id] ?? ""}
+          {provider.key_url && (
+            <>
+              {" "}
+              <a href={provider.key_url} target="_blank" rel="noreferrer">
+                Get a key ↗
+              </a>
+            </>
+          )}
+        </small>
+      </label>
+      {isCustom && (
+        <label>
+          <span>Base URL</span>
+          <input
+            value={form.ai_base_url ?? ""}
+            onChange={(e) => setForm({ ...form, ai_base_url: e.target.value })}
+            placeholder="http://localhost:11434/v1"
+          />
+          <small className="muted">Any OpenAI-compatible API. Ollama on your computer only works with hala serve.</small>
+        </label>
+      )}
+      <SecretField
+        label={`${provider.label} API key${isCustom ? " (if needed)" : ""}`}
+        hint="Each provider's key is saved separately, so you can switch back and forth."
+        isSet={!!settings[`${keyName}_set`]}
+        value={form[keyName] ?? ""}
+        onChange={(v) => setForm({ ...form, [keyName]: v })}
+        onClear={() => clear(keyName)}
+      />
+      <label>
+        <span>
+          Model <span className="muted">(optional)</span>
+        </span>
+        <input
+          value={form.ai_model ?? ""}
+          onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
+          placeholder={provider.default_model || "model name"}
+        />
+        <small className="muted">
+          Leave blank for the default{provider.default_model ? ` (${provider.default_model})` : ""}. Providers rename
+          models over time; if the test says a model isn't found, pick a current one from their model list.
+        </small>
+      </label>
+    </>
+  );
+}
+
+const PROVIDER_HINTS: Record<string, string> = {
+  anthropic: "Claude: best at following the “don't make things up” rules. Paid per use.",
+  gemini: "Free tier with daily limits. Good at Filipino and Taglish.",
+  groq: "Free tier with rate limits. Very fast; open models.",
+  openrouter: "One key, many models, including some free ones (model names ending in :free).",
+  openai: "ChatGPT models. Paid per use.",
+  custom: "Any server that speaks the OpenAI API, such as Ollama or LM Studio.",
+};
 
 function SecretField(props: {
   label: string;

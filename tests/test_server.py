@@ -268,3 +268,35 @@ def test_preview_endpoint_and_public_page(client, store):
     assert "preview_html" not in client.get("/api/leads").json()[0]  # list stays light
     assert client.get("/preview/nope").status_code == 404
     assert client.post(f"/api/leads/{lead_id}/preview", json={"language": "Klingon"}).status_code == 400
+
+
+def test_ai_provider_settings_and_test_button(client, monkeypatch):
+    s = client.get("/api/settings").json()
+    assert s["ai_provider"] == "anthropic" and any(p["id"] == "gemini" for p in s["ai_providers"])
+    assert client.put("/api/settings", json={"ai_provider": "skynet"}).status_code == 400
+    r = client.put("/api/settings", json={"ai_provider": "gemini", "gemini_api_key": "AIza-secret"})
+    assert r.json()["gemini_api_key_set"] is True and "AIza-secret" not in r.text
+
+    from hala import ai
+    monkeypatch.setattr(ai, "test_writer", lambda w: (True, "Hello po!"))
+    t = client.post("/api/settings/test-ai").json()
+    assert t == {"ok": True, "message": "Hello po!", "provider": "gemini", "model": ai.PROVIDERS["gemini"]["model"]}
+
+    client.delete("/api/settings/gemini_api_key")
+    t = client.post("/api/settings/test-ai").json()
+    assert t["ok"] is False and "Add an API key" in t["message"]
+
+
+def test_search_uses_chosen_provider(client, store, monkeypatch):
+    fake_search(monkeypatch)
+    from hala import ai
+
+    class FakeWriter(ai.Writer):
+        name = "gemini"
+
+        def generate(self, system, user, schema, effort="medium"):
+            return {"subject": "s", "body": "b", "angle": "a"}
+    monkeypatch.setattr(ai, "writer_from_settings", lambda settings: FakeWriter())
+    run_job(client)
+    lead = client.get("/api/leads?kind=site").json()[0]
+    assert lead["pitch_source"] == "gemini"

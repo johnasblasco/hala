@@ -32,6 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import ai
 from . import find as finder
 from .audit import audit
 from .db import SECRET_KEYS, STATUSES, DatabaseUnavailable, Store
@@ -175,16 +176,22 @@ class SettingsPatch(BaseModel):
     report_base_url: str | None = None
     google_api_key: str | None = None
     anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
+    groq_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    openai_api_key: str | None = None
+    custom_api_key: str | None = None
     use_ai: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_base_url: str | None = None
 
 
 # --- pipeline --------------------------------------------------------------
 
-def _claude_client(settings: dict):
-    if settings.get("use_ai") != "1" or not settings.get("anthropic_api_key"):
-        return None
-    import anthropic
-    return anthropic.Anthropic(api_key=settings["anthropic_api_key"])
+def _writer(settings: dict):
+    """The AI writer chosen in Settings, or None (template copy is used then)."""
+    return ai.writer_from_settings(settings)
 
 
 def report_slug(token: str, name: str) -> str:
@@ -198,7 +205,7 @@ def report_url(settings: dict, token: str, name: str, local_base: str) -> str:
     return f"{local_base}/reports/{token}"
 
 
-def process_site_lead(store: Store, lead: dict, settings: dict, client, local_base: str,
+def process_site_lead(store: Store, lead: dict, settings: dict, writer, local_base: str,
                       result=None) -> int:
     """Audit (unless given), qualify, render report and write the pitch for one lead."""
     result = result or audit(lead["website"])
@@ -221,7 +228,7 @@ def process_site_lead(store: Store, lead: dict, settings: dict, client, local_ba
     pitch_data: dict = {}
     if q.tier != "skip":
         url = report_url(settings, token, lead.get("name", ""), local_base)
-        p = write_pitch(lead, result, url, sender, use_claude=client is not None, client=client)
+        p = write_pitch(lead, result, url, sender, use_claude=False, writer=writer)
         pitch_data = {"subject": p.subject, "body": p.body, "angle": p.angle,
                       "pitch_source": p.source}
     store.upsert_lead({**data, "report_html": report, **pitch_data})
@@ -271,10 +278,10 @@ def _audit_stage(store: Store, job: dict, local_base: str) -> None:
         return lead, audit(lead["website"])
 
     settings = store.get_settings()
-    client = _claude_client(settings)
+    writer = _writer(settings)
     with ThreadPoolExecutor(max_workers=STEP_BATCH) as pool:
         for lead, result in pool.map(prepare, batch):
-            process_site_lead(store, lead, settings, client, local_base, result)
+            process_site_lead(store, lead, settings, writer, local_base, result)
     store.update_job(job["id"], pending=rest, done=job["done"] + len(batch),
                      status="running" if rest else "done",
                      stage="Auditing websites" if rest else "Done")
@@ -347,16 +354,34 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         # Never send secrets back to the browser; only whether they are set.
         for k in SECRET_KEYS:
             s[k + "_set"] = bool(s.pop(k))
+        s["ai_providers"] = [{"id": pid, "label": p["label"], "default_model": p["model"],
+                              "key_url": p["key_url"]} for pid, p in ai.PROVIDERS.items()]
         return s
 
     @api.put("/settings")
     def put_settings(patch: SettingsPatch):
         values = patch.model_dump(exclude_none=True)
+        if "ai_provider" in values and values["ai_provider"] not in ai.PROVIDERS:
+            raise HTTPException(400, "unknown AI provider")
         for k in SECRET_KEYS:
             if values.get(k) == "":
                 values.pop(k)  # blank secret field = keep the existing value
         store.save_settings(values)
         return get_settings()
+
+    @api.post("/settings/test-ai")
+    def test_ai():
+        """Send a tiny request with the current AI settings and report what happened."""
+        settings = store.get_settings()
+        if settings.get("use_ai") != "1":
+            return {"ok": False, "message": "AI is turned off. Turn it on to test."}
+        writer = _writer(settings)
+        if writer is None:
+            label = ai.PROVIDERS.get(settings.get("ai_provider") or "", {}).get("label", "this provider")
+            return {"ok": False, "message": f"Add an API key{' and base URL' if settings.get('ai_provider') == 'custom' else ''} for {label} first."}
+        ok, message = ai.test_writer(writer)
+        return {"ok": ok, "message": message, "provider": writer.name,
+                "model": getattr(writer, "model", "")}
 
     @api.delete("/settings/{key}")
     def clear_secret(key: str):
@@ -440,7 +465,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         if lead["status"] != "new":
             store.update_lead(lead_id, {"status": "new"})
         settings = store.get_settings()
-        process_site_lead(store, lead, settings, _claude_client(settings), local_base)
+        process_site_lead(store, lead, settings, _writer(settings), local_base)
         store.update_lead(lead_id, {"status": lead["status"]})
         return store.get_lead(lead_id)
 
@@ -455,7 +480,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         notes = json.dumps({"notes": req.notes, "photos": req.photos,
                             "facebook_url": req.facebook_url, "language": req.language})
         html, source = build_preview(lead, store.sender(), req.notes, req.photos, req.facebook_url,
-                                     req.language, _claude_client(store.get_settings()))
+                                     req.language, writer=_writer(store.get_settings()))
         lead = store.save_preview(lead_id, html, notes, source)
         return {**lead, "preview_url": f"{local_base}/preview/{lead['preview_token']}"}
 

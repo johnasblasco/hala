@@ -77,6 +77,13 @@ export interface Stats {
   angles: { angle: string; sent: number; replies: number }[];
 }
 
+export interface AIProvider {
+  id: string;
+  label: string;
+  default_model: string;
+  key_url: string;
+}
+
 export interface Settings {
   sender_name: string;
   sender_company: string;
@@ -84,8 +91,12 @@ export interface Settings {
   sender_address: string;
   report_base_url: string;
   use_ai: string;
+  ai_provider: string;
+  ai_model: string;
+  ai_base_url: string;
+  ai_providers: AIProvider[];
   google_api_key_set: boolean;
-  anthropic_api_key_set: boolean;
+  [key: `${string}_api_key_set`]: boolean;
 }
 
 export interface AuditResult {
