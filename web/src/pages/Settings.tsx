@@ -81,13 +81,17 @@ export default function SettingsPage() {
         </div>
       </header>
 
-      <form className="card form" onSubmit={save}>
+      <form className="card form" onSubmit={save} autoComplete="off">
         <h2>You</h2>
         {FIELDS.map((f) => (
           <label key={f.key}>
             <span>{f.label}</span>
             <input
               value={form[f.key] ?? ""}
+              name={`hala-${f.key}`}
+              autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore="true"
               placeholder={f.placeholder}
               onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
             />
@@ -203,21 +207,69 @@ function AISettings({
         onChange={(v) => setForm({ ...form, [keyName]: v })}
         onClear={() => clear(keyName)}
       />
-      <label>
-        <span>
-          Model <span className="muted">(optional)</span>
-        </span>
-        <input
-          value={form.ai_model ?? ""}
-          onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
-          placeholder={provider.default_model || "model name"}
-        />
-        <small className="muted">
-          Leave blank for the default{provider.default_model ? ` (${provider.default_model})` : ""}. Providers rename
-          models over time; if the test says a model isn't found, pick a current one from their model list.
-        </small>
-      </label>
+      <ModelPicker settings={settings} form={form} setForm={setForm} />
     </>
+  );
+}
+
+function ModelPicker({
+  settings,
+  form,
+  setForm,
+}: {
+  settings: Settings;
+  form: Record<string, string>;
+  setForm: (f: Record<string, string>) => void;
+}) {
+  const [list, setList] = useState<{ models: string[]; automatic: string | null; error: string | null } | null>(
+    null,
+  );
+  const savedProvider = form.ai_provider === settings.ai_provider;
+  const keySaved = !!settings[`${settings.ai_provider}_api_key_set`] || settings.ai_provider === "custom";
+
+  useEffect(() => {
+    setList(null);
+    if (!savedProvider || !keySaved) return;
+    api.models().then(setList).catch((e) => setList({ models: [], automatic: null, error: e.message }));
+    // Reload when the saved provider/key/base URL change (settings object is replaced on save).
+  }, [settings, savedProvider, keySaved]);
+
+  const current = form.ai_model ?? "";
+  const options = list?.models ?? [];
+  const showTextInput = !!list?.error || (list !== null && options.length === 0);
+
+  return (
+    <label>
+      <span>Model</span>
+      {showTextInput ? (
+        <input
+          value={current}
+          onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
+          placeholder="Automatic"
+        />
+      ) : (
+        <select value={current} onChange={(e) => setForm({ ...form, ai_model: e.target.value })}>
+          <option value="">
+            Automatic{list?.automatic ? ` (best available: ${list.automatic})` : " (recommended)"}
+          </option>
+          {current && !options.includes(current) && <option value={current}>{current} (not in your list)</option>}
+          {options.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      )}
+      <small className="muted">
+        {!savedProvider || !keySaved
+          ? "Save your key to see the models it can use. Automatic picks a good current one for you."
+          : list === null
+            ? "Loading the models your key can use…"
+            : list.error
+              ? `Couldn't load the model list: ${list.error}`
+              : "Automatic picks the best current model, so renamed or retired models won't break anything."}
+      </small>
+    </label>
   );
 }
 
@@ -244,12 +296,22 @@ function SecretField(props: {
         {props.label} {props.isSet && <em className="ok-text">· saved</em>}
       </span>
       <div className="inline-form">
+        {/* Not type="password": browsers treat this page like a login form and autofill saved
+            passwords into password fields. A masked text field isn't autofilled. */}
         <input
-          type="password"
+          type="text"
+          className="masked"
+          name={`hala-key-${props.label.replace(/\W+/g, "-").toLowerCase()}`}
           value={props.value}
           placeholder={props.isSet ? "•••••••• (leave blank to keep)" : "Paste key"}
           onChange={(e) => props.onChange(e.target.value)}
           autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-bwignore="true"
         />
         {props.isSet && (
           <button type="button" className="btn btn-small" onClick={props.onClear}>

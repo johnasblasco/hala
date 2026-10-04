@@ -129,10 +129,10 @@ def test_status_updates_and_repeat_search_keeps_user_work(client, monkeypatch):
 
 
 def test_settings_hide_secrets(client):
-    r = client.put("/api/settings", json={"sender_name": "Johnas", "anthropic_api_key": "sk-secret"})
+    r = client.put("/api/settings", json={"sender_name": "Johnas", "anthropic_api_key": "sk-ant-secret"})
     body = r.json()
     assert body["sender_name"] == "Johnas"
-    assert body["anthropic_api_key_set"] is True and "sk-secret" not in r.text
+    assert body["anthropic_api_key_set"] is True and "sk-ant-secret" not in r.text
     assert client.put("/api/settings", json={"anthropic_api_key": ""}).json()["anthropic_api_key_set"]
     assert not client.delete("/api/settings/anthropic_api_key").json()["anthropic_api_key_set"]
 
@@ -278,9 +278,12 @@ def test_ai_provider_settings_and_test_button(client, monkeypatch):
     assert r.json()["gemini_api_key_set"] is True and "AIza-secret" not in r.text
 
     from hala import ai
+    monkeypatch.setattr(ai, "list_models", lambda *a, **k: ["gemini-3.0-flash", "text-embedding-004"])
     monkeypatch.setattr(ai, "test_writer", lambda w: (True, "Hello po!"))
     t = client.post("/api/settings/test-ai").json()
-    assert t == {"ok": True, "message": "Hello po!", "provider": "gemini", "model": ai.PROVIDERS["gemini"]["model"]}
+    assert t == {"ok": True, "message": "Hello po!", "provider": "gemini", "model": "gemini-3.0-flash"}
+    m = client.get("/api/settings/models").json()
+    assert m == {"models": ["gemini-3.0-flash"], "automatic": "gemini-3.0-flash", "error": None}
 
     client.delete("/api/settings/gemini_api_key")
     t = client.post("/api/settings/test-ai").json()
@@ -300,3 +303,11 @@ def test_search_uses_chosen_provider(client, store, monkeypatch):
     run_job(client)
     lead = client.get("/api/leads?kind=site").json()[0]
     assert lead["pitch_source"] == "gemini"
+
+
+def test_autofilled_passwords_are_rejected(client):
+    r = client.put("/api/settings", json={"google_api_key": "MyPassw0rd!"})
+    assert r.status_code == 400 and "autofill" in r.json()["detail"]
+    assert not client.get("/api/settings").json()["google_api_key_set"]
+    ok = client.put("/api/settings", json={"google_api_key": "  AIzaSyD-real-key  ", "groq_api_key": "gsk_abc"})
+    assert ok.status_code == 200 and ok.json()["google_api_key_set"] and ok.json()["groq_api_key_set"]

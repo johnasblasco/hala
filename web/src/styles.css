@@ -291,3 +291,6 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 .preview-result { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
 .preview-link { word-break: break-all; font-weight: 600; padding-top: 8px; }
 .error-text { color: var(--bad); font-weight: 500; }
+/* API keys: masked like a password, but not a password field (so browsers don't autofill it) */
+.masked { -webkit-text-security: disc; text-security: disc; font-family: ui-monospace, monospace; }
+.masked::placeholder { font-family: system-ui, sans-serif; }

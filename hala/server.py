@@ -187,6 +187,16 @@ class SettingsPatch(BaseModel):
     ai_base_url: str | None = None
 
 
+# Key formats that have been stable for years. Catches browser-autofilled passwords.
+KEY_FORMATS = {
+    "google_api_key": ("AIza", "Google API key"),
+    "gemini_api_key": ("AIza", "Gemini API key"),
+    "groq_api_key": ("gsk_", "Groq API key"),
+    "anthropic_api_key": ("sk-ant-", "Anthropic API key"),
+    "openrouter_api_key": ("sk-or-", "OpenRouter API key"),
+}
+
+
 # --- pipeline --------------------------------------------------------------
 
 def _writer(settings: dict):
@@ -360,7 +370,12 @@ def create_app(store: Store | None = None, local_base: str | None = None,
 
     @api.put("/settings")
     def put_settings(patch: SettingsPatch):
-        values = patch.model_dump(exclude_none=True)
+        values = {k: v.strip() if isinstance(v, str) else v
+                  for k, v in patch.model_dump(exclude_none=True).items()}
+        for k, (prefix, label) in KEY_FORMATS.items():
+            if values.get(k) and not values[k].startswith(prefix):
+                raise HTTPException(400, f"That doesn't look like a {label} (they start with "
+                                         f"\"{prefix}\"). Did your browser autofill a saved password?")
         if "ai_provider" in values and values["ai_provider"] not in ai.PROVIDERS:
             raise HTTPException(400, "unknown AI provider")
         for k in SECRET_KEYS:
@@ -368,6 +383,22 @@ def create_app(store: Store | None = None, local_base: str | None = None,
                 values.pop(k)  # blank secret field = keep the existing value
         store.save_settings(values)
         return get_settings()
+
+    @api.get("/settings/models")
+    def ai_models():
+        """Models the chosen provider says this key can use, and which one 'Automatic' picks."""
+        settings = store.get_settings()
+        endpoint = ai.provider_endpoint(settings)
+        if endpoint is None:
+            return {"models": [], "automatic": None, "error": None}
+        provider, _spec, base_url, key = endpoint
+        try:
+            ids = ai.list_models(provider, base_url, key)
+        except RuntimeError as e:
+            return {"models": [], "automatic": None, "error": str(e)}
+        usable = [i for i in ids if not ai.NOT_CHAT.search(i)]
+        auto, _ = ai.resolve_model({**settings, "ai_model": ""})
+        return {"models": usable, "automatic": auto, "error": None}
 
     @api.post("/settings/test-ai")
     def test_ai():

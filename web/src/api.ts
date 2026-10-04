@@ -59,6 +59,8 @@ export const api = {
   settings: () => request<Settings>("/api/settings"),
   saveSettings: (values: Record<string, string>) =>
     request<Settings>("/api/settings", { method: "PUT", body: json(values) }),
+  models: () =>
+    request<{ models: string[]; automatic: string | null; error: string | null }>("/api/settings/models"),
   testAI: () =>
     request<{ ok: boolean; message: string; provider?: string; model?: string }>("/api/settings/test-ai", {
       method: "POST",

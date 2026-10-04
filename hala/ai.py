@@ -8,8 +8,10 @@ so a missing key, an exhausted free tier or a bad model name never breaks the ap
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -34,6 +36,75 @@ PROVIDERS = {
     "custom": {"label": "Custom (OpenAI-compatible, e.g. Ollama)", "model": "", "base_url": "",
                "key_url": "", "env": ""},
 }
+
+
+# Used when the model is left on "Automatic": the provider is asked which models
+# the key can use, and the first pattern with a match wins (newest version first).
+PREFER = {
+    "anthropic": [r"^claude-opus-5-5$", r"^claude-opus", r"^claude-sonnet"],
+    "gemini": [r"^gemini-\d+(\.\d+)?-flash$", r"^gemini-\d+(\.\d+)?-pro$", r"^gemini-.*flash", r"^gemini"],
+    "groq": [r"llama-3\.3-70b", r"llama-4", r"gpt-oss-120b", r"llama.*70b", r"qwen", r"gpt-oss", r"llama"],
+    "openrouter": [r"(llama|gemini|deepseek|qwen|gpt-oss|mistral).*:free$", r":free$"],
+    "openai": [r"^gpt-5(\.\d+)?-mini$", r"^gpt-5(\.\d+)?$", r"^gpt-4\.1-mini$", r"^gpt-4o-mini$", r"^gpt-4"],
+    "custom": [],
+}
+# Models that can't write text replies (speech, images, embeddings, safety filters...).
+NOT_CHAT = re.compile(r"(embed|whisper|tts|audio|transcri|speech|image|imagen|guard|moderation|realtime|"
+                      r"dall-e|sora|veo|aqa|rerank|playai|orpheus|compound|live|native|search|computer)",
+                      re.I)
+
+
+def _version_key(model_id: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", model_id))
+
+
+def choose_model(provider: str, ids: list[str]) -> str | None:
+    """Pick the best chat model from what the provider says this key can use."""
+    usable = [i for i in ids if not NOT_CHAT.search(i)]
+    for pattern in PREFER.get(provider, []):
+        matches = [i for i in usable if re.search(pattern, i)]
+        if matches:
+            return sorted(matches, key=_version_key, reverse=True)[0]
+    return usable[0] if usable else None
+
+
+_model_cache: dict[tuple, tuple[list[str], float]] = {}
+
+
+def list_models(provider: str, base_url: str, api_key: str, _open=None) -> list[str]:
+    """Ask the provider which models this key can use (cached for an hour).
+    Raises RuntimeError with a readable message on failure."""
+    cache_key = (provider, base_url, hashlib.sha256(api_key.encode()).hexdigest())
+    hit = _model_cache.get(cache_key)
+    if hit and hit[1] > time.time():
+        return hit[0]
+    if provider == "anthropic":
+        import anthropic
+        try:
+            ids = [m.id for m in anthropic.Anthropic(api_key=api_key).models.list()]
+        except anthropic.APIError as e:
+            raise RuntimeError(f"Anthropic error: {getattr(e, 'message', e)}") from e
+    else:
+        headers = {"User-Agent": "Hala/0.1"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers=headers)
+        try:
+            with (_open or urllib.request.urlopen)(req, timeout=20) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"{provider} error {e.code}: {_error_text(e)}") from e
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            raise RuntimeError(f"Couldn't reach {provider}: {e}") from e
+        items = data.get("data", data.get("models", [])) if isinstance(data, dict) else data
+        ids = []
+        for m in items or []:
+            mid = m.get("id") or m.get("name") if isinstance(m, dict) else m
+            if isinstance(mid, str) and mid:
+                ids.append(mid.removeprefix("models/"))
+    ids = sorted(set(ids))
+    _model_cache[cache_key] = (ids, time.time() + 3600)
+    return ids
 
 
 def key_setting(provider: str) -> str:
@@ -166,21 +237,52 @@ def _parse(writer: Writer, text: str, schema: dict) -> dict | None:
     return data
 
 
-def writer_from_settings(settings: dict) -> Writer | None:
-    """Build the writer chosen in Settings, or None when AI is off or not configured."""
-    if settings.get("use_ai") != "1":
-        return None
+def provider_endpoint(settings: dict) -> tuple[str, dict, str, str] | None:
+    """(provider, spec, base_url, key) for the chosen provider, or None if not usable yet."""
     provider = settings.get("ai_provider") or "anthropic"
     spec = PROVIDERS.get(provider)
     if spec is None:
         return None
     key = settings.get(key_setting(provider), "")
-    model = (settings.get("ai_model") or "").strip() or spec["model"]
-    if provider == "anthropic":
-        return AnthropicWriter(api_key=key, model=model) if key else None
     base_url = (settings.get("ai_base_url") or "").strip() if provider == "custom" else spec["base_url"]
-    if not base_url or not model or (provider != "custom" and not key):
+    if provider == "anthropic":
+        return (provider, spec, "", key) if key else None
+    if not base_url or (provider != "custom" and not key):
         return None
+    return provider, spec, base_url, key
+
+
+def resolve_model(settings: dict, _list=None) -> tuple[str | None, str | None]:
+    """(model, note). A model typed in Settings wins; otherwise pick automatically."""
+    chosen = (settings.get("ai_model") or "").strip()
+    if chosen:
+        return chosen, None
+    endpoint = provider_endpoint(settings)
+    if endpoint is None:
+        return None, None
+    provider, spec, base_url, key = endpoint
+    if provider == "anthropic":
+        return ANTHROPIC_MODEL, None  # always the current default Claude model
+    try:
+        model = choose_model(provider, (_list or list_models)(provider, base_url, key))
+    except RuntimeError as e:
+        return spec["model"] or None, str(e)
+    return (model or spec["model"] or None), None
+
+
+def writer_from_settings(settings: dict, _list=None) -> Writer | None:
+    """Build the writer chosen in Settings, or None when AI is off or not configured."""
+    if settings.get("use_ai") != "1":
+        return None
+    endpoint = provider_endpoint(settings)
+    if endpoint is None:
+        return None
+    provider, _spec, base_url, key = endpoint
+    model, _note = resolve_model(settings, _list)
+    if not model:
+        return None
+    if provider == "anthropic":
+        return AnthropicWriter(api_key=key, model=model)
     return OpenAICompatWriter(base_url, key, model, name=provider)
 
 
