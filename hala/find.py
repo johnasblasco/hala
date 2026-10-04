@@ -314,7 +314,8 @@ def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep)
         for el in data.get("elements", []):
             if not el.get("tags", {}).get("name"):
                 continue
-            leads.append(element_to_lead(el, _place_for(el, places)))
+            # "Malolos City, Bulacan, Philippines" -> "Malolos City"
+            leads.append(element_to_lead(el, _place_for(el, places).split(",")[0].strip()))
         return leads
 
     def search(query: str, max_results: int) -> list[dict]:

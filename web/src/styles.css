@@ -260,3 +260,17 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
   border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer;
 }
 .segmented button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* City picker */
+.cities { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px 14px; margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cities legend { font-weight: 600; font-size: 14px; padding: 0 6px; }
+.cities-tools { display: flex; gap: 8px; align-items: center; }
+.cities-tools input { flex: 1; }
+.city-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; max-height: 300px; overflow-y: auto; }
+.city {
+  flex-direction: row; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 8px; cursor: pointer; font-size: 14px; user-select: none;
+}
+.city input { width: auto; margin: 0; accent-color: var(--accent); }
+.city.checked { border-color: var(--accent); background: var(--accent-soft); }
+.city > span { font-weight: 500; }
