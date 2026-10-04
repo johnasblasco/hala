@@ -127,3 +127,51 @@ def test_claude_refusal_falls_back_to_none():
             return NS(stop_reason="refusal", content=[])
 
     assert claude_pitch({}, bad(), "u", client=NS(beta=NS(messages=FakeMessages()))) is None
+
+
+def test_extract_emails_prefers_own_domain_and_skips_junk():
+    from hala.find import extract_emails
+    html = ('<a href="mailto:jane@gmail.com">x</a> info@brightsmile.ph '
+            'logo@2x.png user@example.com 123@sentry.wixpress.com')
+    assert extract_emails(html, "www.brightsmile.ph") == ["info@brightsmile.ph", "jane@gmail.com"]
+
+
+def test_find_email_tries_contact_pages():
+    from hala.find import find_email
+    pages = {"https://a.ph/contact": "<p>Email us: hello@a.ph</p>"}
+    assert find_email("https://a.ph", _get_page=pages.get) == "hello@a.ph"
+    assert find_email("https://none.ph", _get_page=lambda u: "<p>no email</p>") == ""
+
+
+def test_search_places_paginates():
+    from hala.find import search_places
+    pages = [{"places": [{"displayName": {"text": f"A{i}"}} for i in range(20)], "nextPageToken": "t"},
+             {"places": [{"displayName": {"text": "B"}}]}]
+    sent = []
+
+    def post(url, body, headers):
+        sent.append(body)
+        return pages[len(sent) - 1]
+    out = search_places("dentist", "KEY", _post=post)
+    assert len(out) == 21 and sent[1]["pageToken"] == "t"
+
+
+def test_find_command_splits_no_website(tmp_path, monkeypatch):
+    from hala import find as finder
+    places = [
+        {"displayName": {"text": "Bright Smile"}, "websiteUri": "https://bs.ph", "rating": 4.8,
+         "userRatingCount": 200, "formattedAddress": "1 St, Brgy X, Quezon City, Metro Manila, Philippines",
+         "primaryTypeDisplayName": {"text": "Dentist"}},
+        {"displayName": {"text": "No Site Dental"}, "formattedAddress": "2 St, Makati, Metro Manila, Philippines",
+         "nationalPhoneNumber": "0917 000 0000"},
+    ]
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "KEY")
+    monkeypatch.setattr(finder, "search_places", lambda q, k, m: places)
+    monkeypatch.setattr(finder, "find_email", lambda url: "info@bs.ph")
+    out = tmp_path / "leads.csv"
+    assert main(["find", "dentist in QC", "--out", str(out)]) == 0
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    assert rows[0]["email"] == "info@bs.ph" and rows[0]["city"] == "Quezon City"
+    assert rows[0]["reviews"] == "200" and rows[0]["category"] == "Dentist"
+    nosite = list(csv.DictReader(open(tmp_path / "leads-no-website.csv", encoding="utf-8-sig")))
+    assert nosite[0]["name"] == "No Site Dental"

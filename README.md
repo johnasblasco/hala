@@ -26,6 +26,32 @@ Host `out/reports/` on Cloudflare Pages at the `--report-base-url`. Then import
 `out/campaign.csv` into your sending tool, using a separate sending domain at a
 low daily volume.
 
+## Finding leads automatically
+
+`hala find` searches Google Maps through Google's official Places API, then
+visits each business's website (homepage, then /contact and /about) to find
+a public email address.
+
+```bash
+export GOOGLE_MAPS_API_KEY=...        # PowerShell: $env:GOOGLE_MAPS_API_KEY="..."
+hala find "dentist in Quezon City" "dentist in Makati" --out leads.csv
+
+# or find + run the whole pipeline in one go
+hala find "dentist in Quezon City" --run --no-ai
+```
+
+You get two files:
+
+- `leads.csv`: businesses that have a website, with emails filled in where one was found. This file feeds `hala run`.
+- `leads-no-website.csv`: businesses with **no website at all**, with their phone number and Maps link. These need a site the most, so call or message them.
+
+Getting the API key (one time):
+1. Go to https://console.cloud.google.com/, create a project, and add billing. Google gives a free monthly allowance; check its Places API pricing page for current numbers.
+2. Under **APIs & Services → Library**, enable **Places API (New)**.
+3. Under **APIs & Services → Credentials**, click **Create credentials → API key**. Restrict the key to Places API.
+
+Each search returns at most 60 businesses, so use several searches (one per city or barangay) to get more.
+
 ### Leads CSV columns
 
 | column | required | used for |

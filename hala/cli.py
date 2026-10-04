@@ -14,6 +14,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import find as finder
 from .audit import audit
 from .pitch import write_pitch
 from .qualify import qualify
@@ -101,6 +102,34 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_find(args) -> int:
+    key = finder.api_key_from_env()
+    if not key:
+        print("error: set GOOGLE_MAPS_API_KEY (see README: 'Finding leads automatically')",
+              file=sys.stderr)
+        return 1
+    print(f"searching Google Maps for: {', '.join(args.queries)}", file=sys.stderr)
+    try:
+        with_site, no_site = finder.find_leads(args.queries, key, args.max, args.workers)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    finder.write_leads(args.out, with_site)
+    found = sum(1 for l in with_site if l["email"])
+    print(f"wrote {len(with_site)} businesses to {args.out} ({found} with an email found)",
+          file=sys.stderr)
+    if no_site:
+        no_site_path = str(Path(args.out).with_name(Path(args.out).stem + "-no-website.csv"))
+        finder.write_leads(no_site_path, no_site)
+        print(f"wrote {len(no_site)} businesses with NO website to {no_site_path} "
+              "(call or message these, they need a site most)", file=sys.stderr)
+    if args.run:
+        return cmd_run(argparse.Namespace(
+            leads=args.out, out=args.run_out, limit=50, workers=args.workers,
+            report_base_url=args.report_base_url, no_ai=args.no_ai))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hala", description="Audit, qualify and pitch local business websites.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -118,6 +147,17 @@ def main(argv=None) -> int:
     r.add_argument("--report-base-url", help="public URL where out/reports/ will be hosted")
     r.add_argument("--no-ai", action="store_true", help="use the template instead of Claude")
     r.set_defaults(func=cmd_run)
+
+    f = sub.add_parser("find", help="find leads on Google Maps and look up their emails")
+    f.add_argument("queries", nargs="+", help='e.g. "dentist in Quezon City" "dentist in Makati"')
+    f.add_argument("--out", default="leads.csv")
+    f.add_argument("--max", type=int, default=60, help="max businesses per search (Google allows 60)")
+    f.add_argument("--workers", type=int, default=8)
+    f.add_argument("--run", action="store_true", help="run the full pipeline right after")
+    f.add_argument("--run-out", default="out", help="output folder when using --run")
+    f.add_argument("--report-base-url")
+    f.add_argument("--no-ai", action="store_true")
+    f.set_defaults(func=cmd_find)
 
     args = ap.parse_args(argv)
     return args.func(args)
