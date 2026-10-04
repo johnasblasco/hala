@@ -151,7 +151,7 @@ def run_search(store: Store, jobs: Jobs, job: dict, req: SearchRequest, local_ba
                 raise RuntimeError("Add a Google API key in Settings, or use OpenStreetMap.")
             search = finder.google_search(settings["google_api_key"])
         else:
-            search = finder.osm_search()
+            search = finder.osm_search(notify=lambda m: jobs.update(job, stage=m))
         queries = list(dict.fromkeys(q.strip() for q in req.queries if q.strip()))
         if not queries:
             raise RuntimeError("Enter at least one search.")

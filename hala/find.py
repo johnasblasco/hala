@@ -35,8 +35,8 @@ OVERPASS_URLS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 )
+RETRY_STATUSES = (429, 503, 504)  # busy / rate-limited: wait and retry the same server
 # OSM servers ask for an honest app name with a contact URL, not a browser-like string.
 OSM_HEADERS = {
     "User-Agent": "Hala/0.1 (website lead finder; https://github.com/johnasblasco/hala)",
@@ -216,23 +216,36 @@ def _get_json(url: str, params: dict) -> object:
         return json.loads(resp.read())
 
 
-def _overpass(query: str, _open=None) -> dict:
-    """Run an Overpass query, falling back across public servers."""
+def _overpass(query: str, _open=None, _sleep=time.sleep, notify=None) -> dict:
+    """Run an Overpass query. Waits and retries when a server is busy, then tries the next one."""
     open_url = _open or urllib.request.urlopen
     body = urllib.parse.urlencode({"data": query}).encode()
     errors = []
     for url in OVERPASS_URLS:
-        req = urllib.request.Request(url, data=body, headers={
-            **OSM_HEADERS, "Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            with open_url(req, timeout=90) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            errors.append(f"{urlparse(url).netloc}: HTTP {e.code}")
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-            errors.append(f"{urlparse(url).netloc}: {e}")
-    raise RuntimeError("all OpenStreetMap servers failed (" + "; ".join(errors) +
-                       "). Try again in a few minutes, or use --source google")
+        host = urlparse(url).netloc
+        for attempt in range(3):
+            req = urllib.request.Request(url, data=body, headers={
+                **OSM_HEADERS, "Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                with open_url(req, timeout=150) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code in RETRY_STATUSES and attempt < 2:
+                    try:
+                        wait = int(e.headers.get("Retry-After", "")) if e.headers else 0
+                    except ValueError:
+                        wait = 0
+                    wait = min(max(wait, 15 * (attempt + 1)), 60)
+                    if notify:
+                        notify(f"OpenStreetMap is busy, retrying in {wait}s")
+                    _sleep(wait)
+                    continue
+                errors.append(f"{host}: HTTP {e.code}")
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                errors.append(f"{host}: {e}")
+            break
+    raise RuntimeError("OpenStreetMap's free servers are busy right now. Wait a few minutes and "
+                       "try again, or add a Google API key. (Details: " + "; ".join(errors) + ")")
 
 
 def geocode_bbox(place: str, _get=None) -> tuple[float, float, float, float]:
@@ -274,20 +287,51 @@ def element_to_lead(el: dict, city: str) -> dict:
     }
 
 
-def osm_search(_overpass_fn=None, _geocode=None):
-    run_query = _overpass_fn or _overpass
+def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep):
+    """Return an OSM search function. Its `.batch` runs many places as ONE Overpass query,
+    which avoids the public servers' rate limits."""
+    run_query = _overpass_fn or (lambda q: _overpass(q, notify=notify))
     geocode = _geocode or geocode_bbox
 
+    def batch(queries: list[str], max_per_query: int) -> list[dict]:
+        places = []  # (place name, bbox)
+        parts = []
+        for i, query in enumerate(queries):
+            kind, place = split_query(query)
+            if notify:
+                notify(f"Looking up {place}")
+            if i:
+                _sleep(1)  # Nominatim allows one request per second
+            bbox = geocode(place)
+            places.append((place, bbox))
+            box = "({},{},{},{})".format(*bbox)
+            parts.extend(f"nwr{f}{box};" for f in osm_tag_filters(kind))
+        if notify:
+            notify("Searching OpenStreetMap")
+        limit = max_per_query * len(queries)
+        data = run_query(f"[out:json][timeout:120];({''.join(parts)});out center tags {limit};")
+        leads = []
+        for el in data.get("elements", []):
+            if not el.get("tags", {}).get("name"):
+                continue
+            leads.append(element_to_lead(el, _place_for(el, places)))
+        return leads
+
     def search(query: str, max_results: int) -> list[dict]:
-        kind, place = split_query(query)
-        s, w, n, e = geocode(place)
-        bbox = f"({s},{w},{n},{e})"
-        parts = "".join(f"nwr{f}{bbox};" for f in osm_tag_filters(kind))
-        data = run_query(f"[out:json][timeout:60];({parts});out center tags {max_results};")
-        time.sleep(1)  # be polite to the free public servers
-        return [element_to_lead(el, place) for el in data.get("elements", [])
-                if el.get("tags", {}).get("name")]
+        return batch([query], max_results)
+
+    search.batch = batch
     return search
+
+
+def _place_for(el: dict, places: list) -> str:
+    lat = el.get("lat") or (el.get("center") or {}).get("lat")
+    lon = el.get("lon") or (el.get("center") or {}).get("lon")
+    if lat is not None and lon is not None:
+        for name, (s, w, n, e) in places:
+            if s <= lat <= n and w <= lon <= e:
+                return name
+    return places[0][0] if places else ""
 
 
 # --- Shared ----------------------------------------------------------------
@@ -301,13 +345,16 @@ def find_leads(queries: list[str], search, max_per_query: int = 60, workers: int
     email_of = _find_email or find_email
     seen: set[str] = set()
     with_site, no_site = [], []
-    for q in queries:
-        for lead in search(q, max_per_query):
-            key = (lead["name"] + lead["address"]).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            (with_site if lead["website"] else no_site).append(lead)
+    if hasattr(search, "batch"):
+        found = search.batch(queries, max_per_query)
+    else:
+        found = [lead for q in queries for lead in search(q, max_per_query)]
+    for lead in found:
+        key = (lead["name"] + lead["address"]).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        (with_site if lead["website"] else no_site).append(lead)
     need_email = [l for l in with_site if not l["email"]]
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for lead, email in zip(need_email, pool.map(lambda l: email_of(l["website"]), need_email)):

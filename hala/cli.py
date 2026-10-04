@@ -114,7 +114,7 @@ def cmd_find(args) -> int:
         search = finder.google_search(key)
         print(f"searching Google Maps for: {', '.join(dict.fromkeys(args.queries))}", file=sys.stderr)
     else:
-        search = finder.osm_search()
+        search = finder.osm_search(notify=lambda m: print(f"  {m}...", file=sys.stderr))
         print(f"searching OpenStreetMap (free) for: {', '.join(dict.fromkeys(args.queries))}", file=sys.stderr)
     try:
         queries = list(dict.fromkeys(q.strip() for q in args.queries if q.strip()))

@@ -38,7 +38,7 @@ def fake_search(monkeypatch):
          "city": "Malolos", "reviews": "", "rating": "", "runs_ads": "", "phone": "0917",
          "address": "3 St", "maps_url": ""},
     ]
-    monkeypatch.setattr(finder, "osm_search", lambda: (lambda q, m: [dict(l) for l in leads]))
+    monkeypatch.setattr(finder, "osm_search", lambda **kw: (lambda q, m: [dict(l) for l in leads]))
     monkeypatch.setattr(finder, "find_email", lambda url: "")
     pages = {"http://bad.ph": bad(), "https://good.ph": good()}
     monkeypatch.setattr(server, "audit", lambda url: pages[url])
@@ -95,7 +95,7 @@ def test_settings_hide_secrets(client):
 
 
 def test_search_error_is_reported(client, monkeypatch):
-    def boom():
+    def boom(**kw):
         def search(q, m):
             raise RuntimeError("all OpenStreetMap servers failed")
         return search

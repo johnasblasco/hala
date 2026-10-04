@@ -218,7 +218,7 @@ def test_find_defaults_to_free_osm(tmp_path, monkeypatch):
     lead = {"name": "Smile", "email": "", "website": "http://smile.ph", "category": "dentist",
             "city": "QC", "reviews": "", "rating": "", "runs_ads": "", "phone": "",
             "address": "", "maps_url": ""}
-    monkeypatch.setattr(finder, "osm_search", lambda: (lambda q, m: [dict(lead)]))
+    monkeypatch.setattr(finder, "osm_search", lambda **kw: (lambda q, m: [dict(lead)]))
     monkeypatch.setattr(finder, "find_email", lambda url: "hi@smile.ph")
     out = tmp_path / "leads.csv"
     assert main(["find", "dentist in QC", "--out", str(out)]) == 0
@@ -260,9 +260,43 @@ def test_run_with_only_no_website_leads(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
     lead = {"name": "Malolos Dental", "email": "", "website": "", "category": "dentist",
             "city": "Malolos", "phone": "0917", "address": "", "maps_url": ""}
-    monkeypatch.setattr(finder, "osm_search", lambda: (lambda q, m: [dict(lead)]))
+    monkeypatch.setattr(finder, "osm_search", lambda **kw: (lambda q, m: [dict(lead)]))
     monkeypatch.chdir(tmp_path)
     assert main(["find", "dentist in Malolos", "--run", "--no-ai"]) == 0
     assert "nothing to audit" in capsys.readouterr().err
     rows = list(csv.DictReader(open("leads-no-website.csv", encoding="utf-8-sig")))
     assert "patients searching Google for a dentist in Malolos" in rows[0]["message"]
+
+
+def test_overpass_waits_and_retries_when_busy():
+    import io
+    import urllib.error
+    from hala import find as finder
+    calls, waits, notes = [], [], []
+
+    def fake_open(req, timeout=0):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many", {}, io.BytesIO(b""))
+        return io.BytesIO(b'{"elements": []}')
+    out = finder._overpass("q", _open=fake_open, _sleep=waits.append, notify=notes.append)
+    assert out == {"elements": []}
+    assert calls == [finder.OVERPASS_URLS[0]] * 2  # retried the same server
+    assert waits == [15] and "busy" in notes[0]
+
+
+def test_osm_batch_makes_one_query_for_many_towns():
+    from hala import find as finder
+    queries = []
+    boxes = {"Malolos": (14.80, 120.78, 14.90, 120.86), "Calumpit": (14.88, 120.70, 14.94, 120.78)}
+
+    def fake_overpass(q):
+        queries.append(q)
+        return {"elements": [
+            {"type": "node", "id": 1, "lat": 14.85, "lon": 120.81, "tags": {"name": "A Dental", "amenity": "dentist"}},
+            {"type": "node", "id": 2, "lat": 14.91, "lon": 120.74, "tags": {"name": "B Dental", "amenity": "dentist"}},
+        ]}
+    search = finder.osm_search(_overpass_fn=fake_overpass, _geocode=boxes.get, _sleep=lambda s: None)
+    with_site, no_site = finder.find_leads(["dentist in Malolos", "dentist in Calumpit"], search)
+    assert len(queries) == 1
+    assert {l["name"]: l["city"] for l in no_site} == {"A Dental": "Malolos", "B Dental": "Calumpit"}
