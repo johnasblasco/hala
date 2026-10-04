@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 DEFAULT_PATH = Path(os.environ.get("HALA_DB", Path.home() / ".hala" / "hala.db"))
 
 STATUSES = ("new", "contacted", "replied", "meeting", "won", "lost", "skip")
+FOLLOW_UP_DAYS = 3  # contacted this long ago with no reply -> follow up
 
 # (name, type) for every lead column except the id. New columns added here are
 # created automatically on existing databases at startup.
@@ -61,6 +62,7 @@ LEAD_COLUMNS = [
     ("pitch_source", "TEXT NOT NULL DEFAULT ''"),
     ("message", "TEXT NOT NULL DEFAULT ''"),
     ("status", "TEXT NOT NULL DEFAULT 'new'"),
+    ("contacted_at", "TEXT NOT NULL DEFAULT ''"),
     ("notes", "TEXT NOT NULL DEFAULT ''"),
     ("search_query", "TEXT NOT NULL DEFAULT ''"),
     ("created_at", "TEXT NOT NULL DEFAULT ''"),
@@ -268,8 +270,9 @@ class Store:
 
     # --- leads -------------------------------------------------------------
 
-    def upsert_lead(self, data: dict) -> int:
-        """Insert or refresh a lead. Returns its id."""
+    def upsert_lead(self, data: dict, force_pitch: bool = False) -> int:
+        """Insert or refresh a lead. Returns its id. The pitch is only overwritten for
+        leads still marked 'new', unless force_pitch (an explicit re-audit)."""
         key = data.get("key") or lead_key(data.get("name", ""), data.get("address", ""),
                                           data.get("website", ""))
         row = {k: data[k] for k in DATA_FIELDS + PITCH_FIELDS if k in data}
@@ -284,7 +287,7 @@ class Store:
                 cur = run(f"INSERT INTO {self.leads} ({', '.join(cols)}) "
                           f"VALUES ({', '.join('?' * len(cols))}) RETURNING id", values)
                 return cur.fetchone()["id"]
-            if existing["status"] != "new":
+            if existing["status"] != "new" and not force_pitch:
                 # The user is already working this lead: keep their copy.
                 row = {k: v for k, v in row.items() if k not in PITCH_FIELDS}
             sets = ", ".join(f"{k} = ?" for k in row)
@@ -329,7 +332,10 @@ class Store:
         if has_website is not None:
             where.append("has_website = ?")
             args.append(int(has_website))
-        if status:
+        if status == "followup":
+            where.append("status = 'contacted' AND contacted_at != '' AND contacted_at < ?")
+            args.append(self._follow_up_cutoff())
+        elif status:
             where.append("status = ?")
             args.append(status)
         if q:
@@ -349,11 +355,21 @@ class Store:
         if "status" in changes and changes["status"] not in STATUSES:
             raise ValueError(f"unknown status {changes['status']!r}")
         if changes:
-            sets = ", ".join(f"{k} = ?" for k in changes)
             with self._tx() as run:
+                if "status" in changes:
+                    prev = run(f"SELECT status FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
+                    if changes["status"] == "contacted" and prev and prev["status"] != "contacted":
+                        changes["contacted_at"] = _now()
+                    elif changes["status"] == "new":
+                        changes["contacted_at"] = ""
+                sets = ", ".join(f"{k} = ?" for k in changes)
                 run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ?",
                     [*changes.values(), _now(), lead_id])
         return self.get_lead(lead_id)
+
+    @staticmethod
+    def _follow_up_cutoff() -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=FOLLOW_UP_DAYS)).isoformat(timespec="seconds")
 
     def delete_lead(self, lead_id: int) -> None:
         with self._tx() as run:
@@ -367,8 +383,10 @@ class Store:
                 SELECT COUNT(*) AS total,
                        SUM(CASE WHEN has_website = 1 THEN 1 ELSE 0 END) AS with_site,
                        SUM(CASE WHEN has_website = 0 THEN 1 ELSE 0 END) AS no_site,
-                       SUM(CASE WHEN tier = 'A' THEN 1 ELSE 0 END) AS tier_a
-                FROM {self.leads}""").fetchone()
+                       SUM(CASE WHEN tier = 'A' THEN 1 ELSE 0 END) AS tier_a,
+                       SUM(CASE WHEN status = 'contacted' AND contacted_at != ''
+                                 AND contacted_at < ? THEN 1 ELSE 0 END) AS follow_ups
+                FROM {self.leads}""", (self._follow_up_cutoff(),)).fetchone()
             angles = run(f"""
                 SELECT angle, COUNT(*) AS sent,
                        SUM(CASE WHEN status IN ('replied', 'meeting', 'won') THEN 1 ELSE 0 END) AS replies
@@ -378,6 +396,7 @@ class Store:
         return {
             "total": int(t["total"] or 0), "with_website": int(t["with_site"] or 0),
             "no_website": int(t["no_site"] or 0), "tier_a": int(t["tier_a"] or 0),
+            "follow_ups_due": int(t["follow_ups"] or 0),
             "by_status": {s: int(by_status.get(s, 0)) for s in STATUSES},
             "angles": [{"angle": a["angle"], "sent": int(a["sent"]), "replies": int(a["replies"] or 0)}
                        for a in angles],

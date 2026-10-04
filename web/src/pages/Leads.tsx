@@ -78,6 +78,7 @@ export default function Leads({ query }: { query: URLSearchParams }) {
         <input type="search" placeholder="Search name, city, email…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">All statuses</option>
+          <option value="followup">⏰ Follow-up due</option>
           {STATUSES.map((s) => (
             <option key={s} value={s}>
               {STATUS_LABEL[s]}

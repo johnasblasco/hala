@@ -18,7 +18,15 @@ function parseSaved(raw: string): Saved {
   }
 }
 
-export default function PreviewSection({ lead, onUpdated }: { lead: Lead; onUpdated: (l: Lead) => void }) {
+export default function PreviewSection({
+  lead,
+  onUpdated,
+  onContacted,
+}: {
+  lead: Lead;
+  onUpdated: (l: Lead) => void;
+  onContacted?: () => void;
+}) {
   const saved = parseSaved(lead.preview_notes);
   const [notes, setNotes] = useState(saved.notes ?? "");
   const [facebook, setFacebook] = useState(saved.facebook_url ?? "");
@@ -105,7 +113,7 @@ export default function PreviewSection({ lead, onUpdated }: { lead: Lead; onUpda
           </a>
           <div className="actions">
             <CopyButton text={url} label="Copy link" />
-            <CopyButton text={message} label="Copy message with link" />
+            <CopyButton text={message} label="Copy message with link" onCopied={onContacted} />
             <span className="muted small">Written by {lead.preview_source || "template"}</span>
           </div>
           {local && (

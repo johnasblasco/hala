@@ -63,7 +63,9 @@ export default function Dashboard() {
       <section className="stat-grid">
         <Stat label="Total leads" value={stats.total} />
         <Stat label="Tier A leads" value={stats.tier_a} hint="Best to contact first" />
-        <Stat label="No website" value={stats.no_website} hint="Need you the most" />
+        <a className="stat-link" href="#/leads?status=followup">
+          <Stat label="Follow-ups due" value={stats.follow_ups_due} hint="Contacted 3+ days ago, no reply" />
+        </a>
         <Stat label="Reply rate" value={`${replyRate}%`} hint={`${replied} of ${contacted} contacted`} />
       </section>
 

@@ -311,3 +311,30 @@ def test_autofilled_passwords_are_rejected(client):
     assert not client.get("/api/settings").json()["google_api_key_set"]
     ok = client.put("/api/settings", json={"google_api_key": "  AIzaSyD-real-key  ", "groq_api_key": "gsk_abc"})
     assert ok.status_code == 200 and ok.json()["google_api_key_set"] and ok.json()["groq_api_key_set"]
+
+
+def test_contacted_at_and_follow_ups(client, store):
+    lead_id = store.upsert_lead({"name": "A", "address": "1", "has_website": 0})
+    lead = client.patch(f"/api/leads/{lead_id}", json={"status": "contacted"}).json()
+    assert lead["contacted_at"]
+    first = lead["contacted_at"]
+    # saving again as contacted keeps the original time; replied keeps it too
+    assert client.patch(f"/api/leads/{lead_id}", json={"status": "contacted", "notes": "x"}).json()["contacted_at"] == first
+    assert client.get("/api/leads?status=followup").json() == []  # contacted just now
+    with store._tx() as run:  # pretend it was 4 days ago
+        run(f"UPDATE {store.leads} SET contacted_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (lead_id,))
+    assert [l["id"] for l in client.get("/api/leads?status=followup").json()] == [lead_id]
+    assert client.get("/api/stats").json()["follow_ups_due"] == 1
+    client.patch(f"/api/leads/{lead_id}", json={"status": "replied"})
+    assert client.get("/api/stats").json()["follow_ups_due"] == 0
+    assert client.patch(f"/api/leads/{lead_id}", json={"status": "new"}).json()["contacted_at"] == ""
+
+
+def test_reaudit_keeps_status_and_contacted_time(client, store, monkeypatch):
+    fake_search(monkeypatch)
+    run_job(client)
+    lead = client.get("/api/leads?kind=site").json()[0]
+    first = client.patch(f"/api/leads/{lead['id']}", json={"status": "contacted", "body": "edited"}).json()
+    again = client.post(f"/api/leads/{lead['id']}/refresh").json()
+    assert again["status"] == "contacted" and again["contacted_at"] == first["contacted_at"]
+    assert again["body"] != "edited"  # an explicit re-audit rewrites the email

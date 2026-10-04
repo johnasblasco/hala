@@ -216,7 +216,7 @@ def report_url(settings: dict, token: str, name: str, local_base: str) -> str:
 
 
 def process_site_lead(store: Store, lead: dict, settings: dict, writer, local_base: str,
-                      result=None) -> int:
+                      result=None, force_pitch: bool = False) -> int:
     """Audit (unless given), qualify, render report and write the pitch for one lead."""
     result = result or audit(lead["website"])
     q = qualify(lead, result)
@@ -241,7 +241,7 @@ def process_site_lead(store: Store, lead: dict, settings: dict, writer, local_ba
         p = write_pitch(lead, result, url, sender, use_claude=False, writer=writer)
         pitch_data = {"subject": p.subject, "body": p.body, "angle": p.angle,
                       "pitch_source": p.source}
-    store.upsert_lead({**data, "report_html": report, **pitch_data})
+    store.upsert_lead({**data, "report_html": report, **pitch_data}, force_pitch=force_pitch)
     return lead_id
 
 
@@ -493,11 +493,8 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             raise HTTPException(404, "lead not found")
         if not lead["has_website"]:
             raise HTTPException(400, "this business has no website to audit")
-        if lead["status"] != "new":
-            store.update_lead(lead_id, {"status": "new"})
         settings = store.get_settings()
-        process_site_lead(store, lead, settings, _writer(settings), local_base)
-        store.update_lead(lead_id, {"status": lead["status"]})
+        process_site_lead(store, lead, settings, _writer(settings), local_base, force_pitch=True)
         return store.get_lead(lead_id)
 
     @api.post("/leads/{lead_id}/preview")

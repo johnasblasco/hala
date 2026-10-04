@@ -294,3 +294,13 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
 /* API keys: masked like a password, but not a password field (so browsers don't autofill it) */
 .masked { -webkit-text-security: disc; text-security: disc; font-family: ui-monospace, monospace; }
 .masked::placeholder { font-family: system-ui, sans-serif; }
+
+/* Toast & clickable stats */
+.toast {
+  position: sticky; bottom: 70px; align-self: center; display: flex; align-items: center; gap: 12px;
+  background: var(--ink); color: var(--bg); padding: 10px 12px 10px 16px; border-radius: 10px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.25); font-weight: 600; z-index: 3;
+}
+.toast .btn { background: transparent; color: var(--bg); border-color: rgb(255 255 255 / 0.4); }
+.stat-link, .stat-link:hover { color: inherit; text-decoration: none; display: grid; }
+.stat-link:hover .stat { border-color: var(--accent); }

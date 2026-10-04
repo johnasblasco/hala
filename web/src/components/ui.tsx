@@ -38,7 +38,15 @@ export function FindingList({ findings }: { findings: Finding[] }) {
   );
 }
 
-export function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
+export function CopyButton({
+  text,
+  label = "Copy",
+  onCopied,
+}: {
+  text: string;
+  label?: string;
+  onCopied?: () => void;
+}) {
   const [done, setDone] = useState(false);
   return (
     <button
@@ -48,6 +56,7 @@ export function CopyButton({ text, label = "Copy" }: { text: string; label?: str
       onClick={async () => {
         await navigator.clipboard.writeText(text);
         setDone(true);
+        onCopied?.();
         setTimeout(() => setDone(false), 1500);
       }}
     >

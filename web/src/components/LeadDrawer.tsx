@@ -51,6 +51,21 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
     }
   }
 
+  const [toast, setToast] = useState<string | null>(null);
+
+  /** Outreach actions (copy, Gmail, call) mark a New lead as Contacted, saving the text you sent. */
+  async function markContacted() {
+    if (!lead || lead.status !== "new") return;
+    await save({ ...draft, status: "contacted" }, "Updating");
+    setToast("Marked as contacted");
+    window.setTimeout(() => setToast(null), 8000);
+  }
+
+  async function undoContacted() {
+    setToast(null);
+    await save({ status: "new" }, "Updating");
+  }
+
   async function refresh() {
     setBusy("Re-auditing");
     setError(null);
@@ -132,7 +147,11 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
             Find on Facebook ↗
           </a>
         )}
-        {lead.phone && <a href={`tel:${lead.phone}`}>Call {lead.phone}</a>}
+        {lead.phone && (
+          <a href={`tel:${lead.phone}`} onClick={markContacted}>
+            Call {lead.phone}
+          </a>
+        )}
       </div>
 
       <section className="drawer-section">
@@ -149,6 +168,7 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
             </button>
           ))}
         </div>
+        {lead.contacted_at && <ContactedNote at={lead.contacted_at} status={lead.status} />}
       </section>
 
       {lead.has_website ? (
@@ -202,14 +222,14 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
               </p>
             )}
             <div className="actions">
-              <CopyButton text={draft.body} label="Copy email" />
+              <CopyButton text={draft.body} label="Copy email" onCopied={markContacted} />
               {gmail && (
                 <a
                   className="btn btn-small"
                   href={gmail}
                   target="_blank"
                   rel="noreferrer"
-                  onClick={() => lead.status === "new" && save({ status: "contacted" }, "Updating")}
+                  onClick={markContacted}
                 >
                   Open in Gmail
                 </a>
@@ -223,7 +243,7 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
           <h3>Message (Messenger / SMS)</h3>
           <textarea rows={7} value={draft.message} onChange={(e) => setDraft({ ...draft, message: e.target.value })} />
           <div className="actions">
-            <CopyButton text={draft.message} label="Copy message" />
+            <CopyButton text={draft.message} label="Copy message" onCopied={markContacted} />
             {lead.facebook_search && (
               <a className="btn btn-small" href={lead.facebook_search} target="_blank" rel="noreferrer">
                 Find their Facebook page
@@ -235,6 +255,7 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
 
       <PreviewSection
         lead={lead}
+        onContacted={markContacted}
         onUpdated={(l) => {
           setLead(l);
           onChanged(l);
@@ -257,10 +278,34 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
         <button className="btn btn-danger" onClick={remove}>
           Delete
         </button>
-        <button className="btn btn-primary" disabled={!dirty || !!busy} onClick={() => save(draft)}>
-          {busy === "Saving" ? "Saving…" : dirty ? "Save changes" : "Saved"}
-        </button>
+        {lead.status === "new" ? (
+          <div className="actions">
+            <button className="btn" disabled={!dirty || !!busy} onClick={() => save(draft)}>
+              Save only
+            </button>
+            <button
+              className="btn btn-primary"
+              disabled={!!busy}
+              onClick={() => save({ ...draft, status: "contacted" })}
+              title="Use this after you've sent the message"
+            >
+              {busy === "Saving" ? "Saving…" : "Save & mark contacted"}
+            </button>
+          </div>
+        ) : (
+          <button className="btn btn-primary" disabled={!dirty || !!busy} onClick={() => save(draft)}>
+            {busy === "Saving" ? "Saving…" : dirty ? "Save changes" : "Saved"}
+          </button>
+        )}
       </footer>
+      {toast && (
+        <div className="toast" role="status">
+          <span>✓ {toast}</span>
+          <button className="btn btn-small" onClick={undoContacted}>
+            Undo
+          </button>
+        </div>
+      )}
     </Overlay>
   );
 }
@@ -277,4 +322,17 @@ function Overlay({ children, onClose }: { children: React.ReactNode; onClose: ()
 
 function capitalize(s: string) {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function ContactedNote({ at, status }: { at: string; status: Status }) {
+  const when = new Date(at);
+  const days = Math.floor((Date.now() - when.getTime()) / 86_400_000);
+  const ago = days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+  const due = status === "contacted" && days >= 3;
+  return (
+    <p className={`small ${due ? "alert alert-warn" : "muted"}`} style={{ margin: 0 }}>
+      Contacted {when.toLocaleDateString()} ({ago})
+      {due && ". No reply yet, so it's a good time to follow up."}
+    </p>
+  );
 }

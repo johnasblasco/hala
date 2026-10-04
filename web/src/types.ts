@@ -51,6 +51,7 @@ export interface Lead {
   pitch_source: string;
   message: string;
   status: Status;
+  contacted_at: string;
   notes: string;
   search_query: string;
   created_at: string;
@@ -73,6 +74,7 @@ export interface Stats {
   with_website: number;
   no_website: number;
   tier_a: number;
+  follow_ups_due: number;
   by_status: Record<Status, number>;
   angles: { angle: string; sent: number; replies: number }[];
 }
