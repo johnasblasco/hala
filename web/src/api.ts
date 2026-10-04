@@ -50,6 +50,10 @@ export const api = {
   updateLead: (id: number, changes: Partial<Lead>) =>
     request<Lead>(`/api/leads/${id}`, { method: "PATCH", body: json(changes) }),
   deleteLead: (id: number) => request<{ ok: boolean }>(`/api/leads/${id}`, { method: "DELETE" }),
+  makePreview: (
+    id: number,
+    body: { notes: string; photos: string[]; facebook_url: string; language: string },
+  ) => request<Lead>(`/api/leads/${id}/preview`, { method: "POST", body: json(body) }),
   refreshLead: (id: number) => request<Lead>(`/api/leads/${id}/refresh`, { method: "POST" }),
   audit: (url: string) => request<AuditResult>("/api/audit", { method: "POST", body: json({ url }) }),
   settings: () => request<Settings>("/api/settings"),

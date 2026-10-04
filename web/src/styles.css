@@ -286,3 +286,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); ou
   .account { margin: 0 0 0 auto; padding: 0 0 0 8px; border-top: 0; flex-direction: row; align-items: center; }
   .account-email { display: none; }
 }
+
+/* Preview */
+.preview-result { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
+.preview-link { word-break: break-all; font-weight: 600; padding-top: 8px; }

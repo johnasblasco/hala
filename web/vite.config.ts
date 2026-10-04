@@ -13,6 +13,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:8000",
       "/reports": "http://localhost:8000",
+      "/preview": "http://localhost:8000",
     },
   },
 });

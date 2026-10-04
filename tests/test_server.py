@@ -249,3 +249,22 @@ def test_supabase_url_suffixes_are_stripped(monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", raw)
         monkeypatch.setenv("SUPABASE_ANON_KEY", "k")
         assert server.auth_config()["url"] == "https://p.supabase.co"
+
+
+def test_preview_endpoint_and_public_page(client, store):
+    lead_id = store.upsert_lead({"name": "Santos Dental", "address": "1 St", "category": "dentist",
+                                 "city": "Malolos City", "phone": "0917", "has_website": 0})
+    r = client.post(f"/api/leads/{lead_id}/preview",
+                    json={"notes": "Braces, Whitening", "facebook_url": "https://facebook.com/santos"})
+    body = r.json()
+    assert r.status_code == 200 and body["preview_source"] == "template"
+    assert body["preview_url"].endswith(f"/preview/{body['preview_token']}")
+    page = client.get(f"/preview/{body['preview_token']}")
+    assert page.status_code == 200 and "Santos Dental" in page.text and "Whitening" in page.text
+    # regenerating keeps the same link
+    again = client.post(f"/api/leads/{lead_id}/preview", json={"notes": "Dentures"}).json()
+    assert again["preview_token"] == body["preview_token"]
+    assert "Dentures" in client.get(f"/preview/{body['preview_token']}").text
+    assert "preview_html" not in client.get("/api/leads").json()[0]  # list stays light
+    assert client.get("/preview/nope").status_code == 404
+    assert client.post(f"/api/leads/{lead_id}/preview", json={"language": "Klingon"}).status_code == 400

@@ -12,8 +12,29 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": { "service": "app" } },
-    { "source": "/reports/(.*)", "destination": { "service": "app" } },
-    { "source": "/(.*)", "destination": { "service": "web" } }
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "app"
+      }
+    },
+    {
+      "source": "/reports/(.*)",
+      "destination": {
+        "service": "app"
+      }
+    },
+    {
+      "source": "/preview/(.*)",
+      "destination": {
+        "service": "app"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "web"
+      }
+    }
   ]
 }

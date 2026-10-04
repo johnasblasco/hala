@@ -42,6 +42,9 @@ export interface Lead {
   top_issue: string;
   findings: Finding[];
   report_token: string;
+  preview_token: string;
+  preview_notes: string;
+  preview_source: string;
   subject: string;
   body: string;
   angle: string;

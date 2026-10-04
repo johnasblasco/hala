@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Lead, Status } from "../types";
 import { STATUSES, STATUS_LABEL } from "../types";
+import PreviewSection from "./PreviewSection";
 import { CopyButton, ErrorBox, FindingList, ScoreBadge, TierBadge } from "./ui";
 
 interface Props {
@@ -231,6 +232,14 @@ export default function LeadDrawer({ id, onClose, onChanged }: Props) {
           </div>
         </section>
       )}
+
+      <PreviewSection
+        lead={lead}
+        onUpdated={(l) => {
+          setLead(l);
+          onChanged(l);
+        }}
+      />
 
       <section className="drawer-section">
         <h3>Notes</h3>

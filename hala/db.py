@@ -51,6 +51,10 @@ LEAD_COLUMNS = [
     ("findings", "TEXT NOT NULL DEFAULT '[]'"),
     ("report_html", "TEXT NOT NULL DEFAULT ''"),
     ("report_token", "TEXT NOT NULL DEFAULT ''"),
+    ("preview_html", "TEXT NOT NULL DEFAULT ''"),
+    ("preview_token", "TEXT NOT NULL DEFAULT ''"),
+    ("preview_notes", "TEXT NOT NULL DEFAULT ''"),
+    ("preview_source", "TEXT NOT NULL DEFAULT ''"),
     ("subject", "TEXT NOT NULL DEFAULT ''"),
     ("body", "TEXT NOT NULL DEFAULT ''"),
     ("angle", "TEXT NOT NULL DEFAULT ''"),
@@ -242,6 +246,7 @@ class Store:
                     run(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
         run(f"CREATE UNIQUE INDEX IF NOT EXISTS leads_key_idx ON {self.leads} (key)")
         run(f"CREATE INDEX IF NOT EXISTS leads_token_idx ON {self.leads} (report_token)")
+        run(f"CREATE INDEX IF NOT EXISTS leads_preview_idx ON {self.leads} (preview_token)")
         if self.pg:
             for t in (self.leads, self.settings_t, self.jobs):
                 run(f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY")
@@ -296,6 +301,25 @@ class Store:
             r = run(f"SELECT * FROM {self.leads} WHERE report_token = ?", (token,)).fetchone()
         return self._row(r, True) if r else None
 
+    def save_preview(self, lead_id: int, html: str, notes: str, source: str) -> dict | None:
+        """Store a generated preview. The link (token) stays the same when regenerated."""
+        with self._tx() as run:
+            r = run(f"SELECT preview_token FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
+            if r is None:
+                return None
+            token = r["preview_token"] or secrets.token_urlsafe(12)
+            run(f"UPDATE {self.leads} SET preview_html = ?, preview_token = ?, preview_notes = ?, "
+                f"preview_source = ?, updated_at = ? WHERE id = ?",
+                (html, token, notes, source, _now(), lead_id))
+        return self.get_lead(lead_id)
+
+    def get_preview(self, token: str) -> str | None:
+        if not token:
+            return None
+        with self._tx() as run:
+            r = run(f"SELECT preview_html FROM {self.leads} WHERE preview_token = ?", (token,)).fetchone()
+        return r["preview_html"] if r and r["preview_html"] else None
+
     def list_leads(self, has_website: bool | None = None, status: str | None = None,
                    q: str | None = None) -> list[dict]:
         where, args = [], []
@@ -309,7 +333,7 @@ class Store:
             where.append("(LOWER(name) LIKE ? OR LOWER(city) LIKE ? OR LOWER(category) LIKE ? "
                          "OR LOWER(email) LIKE ?)")
             args.extend([f"%{q.lower()}%"] * 4)
-        cols = ", ".join(["id"] + [n for n, _ in LEAD_COLUMNS if n != "report_html"])
+        cols = ", ".join(["id"] + [n for n, _ in LEAD_COLUMNS if n not in ("report_html", "preview_html")])
         sql = f"SELECT {cols} FROM {self.leads}"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -365,6 +389,7 @@ class Store:
             d["reachable"] = bool(d["reachable"])
         if not with_report:
             d.pop("report_html", None)
+            d.pop("preview_html", None)
         return d
 
     # --- jobs --------------------------------------------------------------

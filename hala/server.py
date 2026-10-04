@@ -36,6 +36,7 @@ from . import find as finder
 from .audit import audit
 from .db import SECRET_KEYS, STATUSES, DatabaseUnavailable, Store
 from .pitch import no_website_message, write_pitch
+from .preview import LANGUAGES, build_preview
 from .qualify import qualify
 from .report import render_report, slugify
 
@@ -157,6 +158,13 @@ class LeadPatch(BaseModel):
     message: str | None = None
     email: str | None = None
     phone: str | None = None
+
+
+class PreviewRequest(BaseModel):
+    notes: str = ""
+    photos: list[str] = []
+    facebook_url: str = ""
+    language: str = "English"
 
 
 class SettingsPatch(BaseModel):
@@ -436,6 +444,21 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         store.update_lead(lead_id, {"status": lead["status"]})
         return store.get_lead(lead_id)
 
+    @api.post("/leads/{lead_id}/preview")
+    def make_preview(lead_id: int, req: PreviewRequest):
+        """Build (or rebuild) a one-page website preview to send to this business."""
+        lead = store.get_lead(lead_id)
+        if not lead:
+            raise HTTPException(404, "lead not found")
+        if req.language not in LANGUAGES:
+            raise HTTPException(400, f"language must be one of {', '.join(LANGUAGES)}")
+        notes = json.dumps({"notes": req.notes, "photos": req.photos,
+                            "facebook_url": req.facebook_url, "language": req.language})
+        html, source = build_preview(lead, store.sender(), req.notes, req.photos, req.facebook_url,
+                                     req.language, _claude_client(store.get_settings()))
+        lead = store.save_preview(lead_id, html, notes, source)
+        return {**lead, "preview_url": f"{local_base}/preview/{lead['preview_token']}"}
+
     @api.get("/stats")
     def stats():
         return {**store.stats(), "statuses": list(STATUSES)}
@@ -462,6 +485,14 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         if not lead or not lead.get("report_html"):
             raise HTTPException(404, "report not found")
         return lead["report_html"]
+
+    @app.get("/preview/{token}", response_class=HTMLResponse)
+    def preview(token: str):
+        """Public on purpose: the link you send to the business owner."""
+        html = store.get_preview(token)
+        if not html:
+            raise HTTPException(404, "preview not found")
+        return html
 
     if not serve_static:
         return app

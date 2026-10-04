@@ -6,7 +6,7 @@ to use Hala from anywhere (your phone, your partner's laptop).
 | Piece | Where it runs | What it does |
 |---|---|---|
 | `web` service | Vercel | The React app (everything except the paths below) |
-| `app` service | Vercel | The Python API: `/api/*` and the public `/reports/*` pages |
+| `app` service | Vercel | The Python API: `/api/*` and the public `/reports/*` and `/preview/*` pages |
 | Database | Supabase Postgres | Leads, settings and search progress (in a private `hala` schema) |
 | Login | Supabase Auth | Email + password, limited to emails you allow |
 
