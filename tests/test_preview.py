@@ -13,7 +13,7 @@ def test_template_preview_has_essentials():
     assert "Santos Dental Clinic" in html and "Braces &amp; aligners" in html
     assert 'href="tel:09171234567"' in html and "Get directions" in html
     assert "Design preview" in html and "noindex" in html  # honest + not indexed
-    assert "★ 4.8 on Google" in html
+    assert "4.8 on Google · 52 reviews" in html
     assert "#0e9f9a" in html  # dentist colour theme
 
 
