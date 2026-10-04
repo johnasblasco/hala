@@ -175,6 +175,9 @@ def test_find_command_splits_no_website(tmp_path, monkeypatch):
     assert rows[0]["reviews"] == "200" and rows[0]["category"] == "Dentist"
     nosite = list(csv.DictReader(open(tmp_path / "leads-no-website.csv", encoding="utf-8-sig")))
     assert nosite[0]["name"] == "No Site Dental"
+    assert nosite[0]["phone"] == "0917 000 0000"
+    assert "don't have a website" in nosite[0]["message"]
+    assert nosite[0]["facebook_search"].startswith("https://www.facebook.com/search/pages/?q=No+Site+Dental")
 
 
 def test_split_query_and_tags():
@@ -249,3 +252,17 @@ def test_overpass_all_fail_message():
         raise urllib.error.HTTPError(req.full_url, 406, "x", {}, io.BytesIO(b""))
     with pytest.raises(RuntimeError, match="overpass-api.de: HTTP 406"):
         finder._overpass("q", _open=fake_open)
+
+
+def test_run_with_only_no_website_leads(tmp_path, monkeypatch, capsys):
+    from hala import find as finder
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+    lead = {"name": "Malolos Dental", "email": "", "website": "", "category": "dentist",
+            "city": "Malolos", "phone": "0917", "address": "", "maps_url": ""}
+    monkeypatch.setattr(finder, "osm_search", lambda: (lambda q, m: [dict(lead)]))
+    monkeypatch.chdir(tmp_path)
+    assert main(["find", "dentist in Malolos", "--run", "--no-ai"]) == 0
+    assert "nothing to audit" in capsys.readouterr().err
+    rows = list(csv.DictReader(open("leads-no-website.csv", encoding="utf-8-sig")))
+    assert "patients searching Google for a dentist in Malolos" in rows[0]["message"]

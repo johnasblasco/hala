@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import find as finder
 from .audit import audit
-from .pitch import write_pitch
+from .pitch import no_website_message, write_pitch
 from .qualify import qualify
 from .report import render_report, slugify
 
@@ -128,9 +128,18 @@ def cmd_find(args) -> int:
           file=sys.stderr)
     if no_site:
         no_site_path = str(Path(args.out).with_name(Path(args.out).stem + "-no-website.csv"))
-        finder.write_leads(no_site_path, no_site)
-        print(f"wrote {len(no_site)} businesses with NO website to {no_site_path} "
-              "(call or message these, they need a site most)", file=sys.stderr)
+        sender = sender_from_env()
+        for lead in no_site:
+            lead["facebook_search"] = finder.facebook_search_url(lead)
+            lead["message"] = no_website_message(lead, sender)
+        finder.write_leads(no_site_path, no_site, finder.NO_SITE_FIELDS)
+        print(f"wrote {len(no_site)} businesses with NO website to {no_site_path}\n"
+              "  -> each has a ready-to-send Messenger/SMS message and a Facebook search link",
+              file=sys.stderr)
+    if args.run and not with_site:
+        print("nothing to audit: none of these businesses list a website. "
+              f"Start with {Path(args.out).stem}-no-website.csv instead.", file=sys.stderr)
+        return 0
     if args.run:
         return cmd_run(argparse.Namespace(
             leads=args.out, out=args.run_out, limit=50, workers=args.workers,

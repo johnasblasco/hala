@@ -315,9 +315,18 @@ def find_leads(queries: list[str], search, max_per_query: int = 60, workers: int
     return with_site, no_site
 
 
-def write_leads(path: str, leads: list[dict]) -> None:
+NO_SITE_FIELDS = ["name", "phone", "city", "category", "address", "maps_url",
+                  "facebook_search", "message"]
+
+
+def facebook_search_url(lead: dict) -> str:
+    q = " ".join(x for x in (lead.get("name"), lead.get("city")) if x)
+    return "https://www.facebook.com/search/pages/?" + urllib.parse.urlencode({"q": q})
+
+
+def write_leads(path: str, leads: list[dict], fields: list[str] = LEAD_FIELDS) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.DictWriter(fh, fieldnames=LEAD_FIELDS)
+        w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(leads)
 

@@ -120,3 +120,24 @@ def write_pitch(lead: dict, audit: AuditResult, report_url: str, sender: dict,
     pitch = pitch or template_pitch(lead, audit, report_url)
     pitch.body = f"{pitch.body.rstrip()}\n\n{compliance_footer(sender)}"
     return pitch
+
+
+CUSTOMER_WORD = {"dentist": "patients", "dental": "patients", "clinic": "patients",
+                 "doctor": "patients", "veterinary": "pet owners", "vet": "pet owners",
+                 "hotel": "guests", "resort": "guests", "guest house": "guests",
+                 "lawyer": "clients", "accountant": "clients", "school": "parents"}
+
+
+def no_website_message(lead: dict, sender: dict) -> str:
+    """Short Messenger/SMS opener for a business that has no website at all."""
+    name = lead.get("name") or "there"
+    category = (lead.get("category") or "").lower()
+    who = next((w for k, w in CUSTOMER_WORD.items() if k in category), "customers")
+    kind = category or "business"
+    where = f" in {lead['city']}" if lead.get("city") else ""
+    me = sender.get("name") or "a local web designer"
+    return (f"Hi {name}! I'm {me}, a web designer. I noticed you don't have a website yet, "
+            f"so {who} searching Google for a {kind}{where} are finding other places first. "
+            "I can build you a simple, mobile-friendly site with tap-to-call and directions, "
+            "and show you a free preview before you decide anything. Would you like to see it? "
+            "If not, no worries, I won't message again.")
