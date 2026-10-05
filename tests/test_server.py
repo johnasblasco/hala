@@ -442,3 +442,74 @@ def test_cancel_search(client, monkeypatch):
     assert out["status"] == "error" and out["stage"] == "Cancelled"
     assert client.post(f"/api/jobs/{job['id']}/step").json()["status"] == "error"  # stays cancelled
     assert out["updated_at"]
+
+
+# --- separate workspaces per account ---------------------------------------
+
+@pytest.fixture
+def two_users(store, monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
+    monkeypatch.setenv("HALA_ALLOWED_EMAILS", "owner@gmail.com, support@n8x.tech")
+    users = {"tok-owner": "owner@gmail.com", "tok-support": "support@n8x.tech"}
+    monkeypatch.setattr(server, "verify_token", lambda token, cfg: users.get(token))
+    c = TestClient(server.create_app(store))
+    owner = {"Authorization": "Bearer tok-owner"}
+    support = {"Authorization": "Bearer tok-support"}
+    return c, owner, support
+
+
+def test_accounts_have_separate_leads_settings_and_searches(two_users, store, monkeypatch):
+    c, owner, support = two_users
+    fake_search(monkeypatch)
+    job = c.post("/api/search", json={"queries": ["dentist in Malolos"]}, headers=owner).json()
+    while job["status"] not in ("done", "error"):
+        job = c.post(f"/api/jobs/{job['id']}/step", headers=owner).json()
+    mine = c.get("/api/leads", headers=owner).json()
+    assert len(mine) == 3
+    assert c.get("/api/leads", headers=support).json() == []
+    assert c.get("/api/stats", headers=support).json()["total"] == 0
+    lead_id = mine[0]["id"]
+    assert c.get(f"/api/leads/{lead_id}", headers=support).status_code == 404
+    assert c.patch(f"/api/leads/{lead_id}", json={"status": "won"}, headers=support).status_code == 404
+    c.delete(f"/api/leads/{lead_id}", headers=support)
+    assert c.get(f"/api/leads/{lead_id}", headers=owner).status_code == 200  # untouched
+    assert c.get(f"/api/jobs/{job['id']}", headers=support).status_code == 404
+
+    c.put("/api/settings", json={"sender_name": "Johnas"}, headers=owner)
+    c.put("/api/settings", json={"sender_name": "N8X Support"}, headers=support)
+    assert c.get("/api/settings", headers=owner).json()["sender_name"] == "Johnas"
+    assert c.get("/api/settings", headers=support).json()["sender_name"] == "N8X Support"
+
+    # the same business can be a lead in both workspaces
+    job2 = c.post("/api/search", json={"queries": ["dentist in Malolos"]}, headers=support).json()
+    while job2["status"] not in ("done", "error"):
+        job2 = c.post(f"/api/jobs/{job2['id']}/step", headers=support).json()
+    assert job2["status"] == "done" and len(c.get("/api/leads", headers=support).json()) == 3
+    assert len(c.get("/api/leads", headers=owner).json()) == 3
+
+
+def test_existing_data_moves_to_the_owner(two_users, store):
+    c, owner, support = two_users
+    # data saved before workspaces existed
+    lead_id = store.upsert_lead({"name": "Old Lead", "address": "1", "has_website": 0})
+    store.save_settings({"sender_name": "Before"})
+    assert c.get("/api/leads", headers=support).json() == []  # support never gets it
+    leads = c.get("/api/leads", headers=owner).json()
+    assert [l["name"] for l in leads] == ["Old Lead"] and leads[0]["id"] == lead_id
+    assert c.get("/api/settings", headers=owner).json()["sender_name"] == "Before"
+    assert c.get("/api/leads", headers=support).json() == []
+
+
+def test_legacy_unprefixed_keys_are_migrated(store):
+    store.check()
+    with store._tx() as run:
+        run(f"INSERT INTO {store.leads} (key, name, created_at, updated_at) VALUES ('old|1', 'Old', 'x', 'x')")
+        run(f"INSERT INTO {store.settings_t} (key, value) VALUES ('sender_name', 'Legacy')")
+    store._shared["ready"] = False  # next use re-runs setup, as after a deploy
+    assert store.get_settings()["sender_name"] == "Legacy"
+    lead = store.list_leads()[0]
+    assert lead["key"] == "default|old|1"
+    # upserting the same business again doesn't duplicate it
+    store.upsert_lead({"key": "old|1", "name": "Old"})
+    assert len(store.list_leads()) == 1

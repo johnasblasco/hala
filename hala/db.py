@@ -12,6 +12,7 @@ browsers) cannot read them. Only the server's direct database connection can.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import secrets
@@ -31,7 +32,8 @@ FOLLOW_UP_DAYS = 3  # contacted this long ago with no reply -> follow up
 # (name, type) for every lead column except the id. New columns added here are
 # created automatically on existing databases at startup.
 LEAD_COLUMNS = [
-    ("key", "TEXT NOT NULL"),
+    ("workspace", "TEXT NOT NULL DEFAULT 'default'"),  # owner's email (or 'default' locally)
+    ("key", "TEXT NOT NULL"),  # "<workspace>|<business>" so each workspace has its own leads
     ("name", "TEXT NOT NULL DEFAULT ''"),
     ("email", "TEXT NOT NULL DEFAULT ''"),
     ("website", "TEXT NOT NULL DEFAULT ''"),
@@ -73,6 +75,7 @@ LEAD_COLUMNS = [
 ]
 
 JOB_COLUMNS = [
+    ("workspace", "TEXT NOT NULL DEFAULT 'default'"),
     ("attempts", "INTEGER NOT NULL DEFAULT 0"),  # steps started but not finished (cut off)
     ("status", "TEXT NOT NULL DEFAULT 'queued'"),   # queued | running | done | error
     ("stage", "TEXT NOT NULL DEFAULT ''"),
@@ -106,6 +109,9 @@ SETTING_KEYS = ("sender_name", "sender_company", "sender_email", "sender_address
                 "ai_base_url", *AI_KEY_SETTINGS,
                 "smtp_user", "smtp_password", "smtp_host", "smtp_port", "daily_send_limit")
 SECRET_KEYS = ("google_api_key", *AI_KEY_SETTINGS, "smtp_password")
+
+
+DEFAULT_WORKSPACE = "default"
 
 
 def _now() -> str:
@@ -163,11 +169,18 @@ class Store:
         self.pg = _is_postgres(target)
         self.path = "postgres" if self.pg else target
         self._lock = threading.Lock()
-        self._conn = None
+        # Shared by every scoped copy (see scoped()): one connection, one migration.
+        self._shared = {"conn": None, "ready": False, "adopted": set()}
+        self.ws = DEFAULT_WORKSPACE
         prefix = "hala." if self.pg else ""
         self.leads, self.settings_t, self.jobs = (f"{prefix}leads", f"{prefix}settings",
                                                   f"{prefix}jobs")
-        self._ready = False  # connect + create tables lazily, on first use
+
+    def scoped(self, workspace: str | None) -> "Store":
+        """A view of this store limited to one workspace (an account's email)."""
+        view = copy.copy(self)  # shares the connection, lock and migration state
+        view.ws = (workspace or DEFAULT_WORKSPACE).strip().lower()
+        return view
 
     @property
     def configured(self) -> bool:
@@ -202,32 +215,34 @@ class Store:
     def _tx(self):
         """Yield an `exec(sql, args)` function; SQL uses `?` placeholders on both backends."""
         with self._lock:
-            if self._conn is None or (self.pg and (self._conn.closed or self._conn.broken)):
+            c = self._shared["conn"]
+            if c is None or (self.pg and (c.closed or c.broken)):
                 try:
-                    self._conn = self._connect()
+                    self._shared["conn"] = self._connect()
                 except DatabaseUnavailable:
                     raise
                 except Exception as e:
                     raise DatabaseUnavailable(_explain(e, self.pg, self.target)) from e
-            conn = self._conn
+            conn = self._shared["conn"]
 
             def run(sql: str, args=()):
                 if self.pg:
                     sql = sql.replace("?", "%s")
                 cur = conn.cursor()
-                cur.execute(sql, tuple(args))
+                # No params: don't let the driver parse '%' in the SQL as a placeholder.
+                cur.execute(sql, tuple(args)) if args else cur.execute(sql)
                 return cur
 
-            if not self._ready:
+            if not self._shared["ready"]:
                 try:
                     self._migrate(run)
                     conn.commit()
-                    self._ready = True
+                    self._shared["ready"] = True
                 except Exception as e:
                     try:
                         conn.rollback()
                     except Exception:
-                        self._conn = None
+                        self._shared["conn"] = None
                     raise DatabaseUnavailable(
                         f"Connected, but couldn't set up Hala's tables: {e}") from e
 
@@ -238,7 +253,7 @@ class Store:
                 try:
                     conn.rollback()
                 except Exception:
-                    self._conn = None  # connection is gone; reconnect next time
+                    self._shared["conn"] = None  # connection is gone; reconnect next time
                 raise
 
     def _migrate(self, run) -> None:
@@ -265,6 +280,12 @@ class Store:
         if self.pg:
             for t in (self.leads, self.settings_t, self.jobs):
                 run(f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY")
+        # Older data had no workspace prefix on lead keys / setting names.
+        run(f"UPDATE {self.leads} SET key = workspace || '|' || key "
+            f"WHERE substr(key, 1, length(workspace) + 1) != workspace || '|'")
+        run(f"UPDATE {self.settings_t} SET key = ? || key WHERE key NOT LIKE ?",
+            (DEFAULT_WORKSPACE + ":", "%:%"))
+        run(f"CREATE INDEX IF NOT EXISTS leads_ws_idx ON {self.leads} (workspace)")
         missing = run(f"SELECT id FROM {self.leads} WHERE report_token = ''").fetchall()
         for r in missing:
             run(f"UPDATE {self.leads} SET report_token = ? WHERE id = ?",
@@ -285,15 +306,18 @@ class Store:
         leads still marked 'new', unless force_pitch (an explicit re-audit)."""
         key = data.get("key") or lead_key(data.get("name", ""), data.get("address", ""),
                                           data.get("website", ""))
+        if not key.startswith(self.ws + "|"):
+            key = f"{self.ws}|{key}"
         row = {k: data[k] for k in DATA_FIELDS + PITCH_FIELDS if k in data}
         if isinstance(row.get("findings"), list):
             row["findings"] = json.dumps(row["findings"])
         now = _now()
         with self._tx() as run:
-            existing = run(f"SELECT id, status FROM {self.leads} WHERE key = ?", (key,)).fetchone()
+            existing = run(f"SELECT id, status FROM {self.leads} WHERE key = ? AND workspace = ?",
+                           (key, self.ws)).fetchone()
             if existing is None:
-                cols = ["key", "report_token", "created_at", "updated_at", *row]
-                values = [key, secrets.token_urlsafe(12), now, now, *row.values()]
+                cols = ["workspace", "key", "report_token", "created_at", "updated_at", *row]
+                values = [self.ws, key, secrets.token_urlsafe(12), now, now, *row.values()]
                 cur = run(f"INSERT INTO {self.leads} ({', '.join(cols)}) "
                           f"VALUES ({', '.join('?' * len(cols))}) RETURNING id", values)
                 return cur.fetchone()["id"]
@@ -301,13 +325,14 @@ class Store:
                 # The user is already working this lead: keep their copy.
                 row = {k: v for k, v in row.items() if k not in PITCH_FIELDS}
             sets = ", ".join(f"{k} = ?" for k in row)
-            run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ?",
-                [*row.values(), now, existing["id"]])
+            run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ? AND workspace = ?",
+                [*row.values(), now, existing["id"], self.ws])
             return existing["id"]
 
     def get_lead(self, lead_id: int, with_report: bool = False) -> dict | None:
         with self._tx() as run:
-            r = run(f"SELECT * FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
+            r = run(f"SELECT * FROM {self.leads} WHERE id = ? AND workspace = ?",
+                    (lead_id, self.ws)).fetchone()
         return self._row(r, with_report) if r else None
 
     def get_lead_by_token(self, token: str) -> dict | None:
@@ -320,13 +345,14 @@ class Store:
     def save_preview(self, lead_id: int, html: str, notes: str, source: str) -> dict | None:
         """Store a generated preview. The link (token) stays the same when regenerated."""
         with self._tx() as run:
-            r = run(f"SELECT preview_token FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
+            r = run(f"SELECT preview_token FROM {self.leads} WHERE id = ? AND workspace = ?",
+                    (lead_id, self.ws)).fetchone()
             if r is None:
                 return None
             token = r["preview_token"] or secrets.token_urlsafe(12)
             run(f"UPDATE {self.leads} SET preview_html = ?, preview_token = ?, preview_notes = ?, "
-                f"preview_source = ?, updated_at = ? WHERE id = ?",
-                (html, token, notes, source, _now(), lead_id))
+                f"preview_source = ?, updated_at = ? WHERE id = ? AND workspace = ?",
+                (html, token, notes, source, _now(), lead_id, self.ws))
         return self.get_lead(lead_id)
 
     def get_preview(self, token: str) -> str | None:
@@ -338,7 +364,7 @@ class Store:
 
     def list_leads(self, has_website: bool | None = None, status: str | None = None,
                    q: str | None = None) -> list[dict]:
-        where, args = [], []
+        where, args = ["workspace = ?"], [self.ws]
         if has_website is not None:
             where.append("has_website = ?")
             args.append(int(has_website))
@@ -367,14 +393,15 @@ class Store:
         if changes:
             with self._tx() as run:
                 if "status" in changes:
-                    prev = run(f"SELECT status FROM {self.leads} WHERE id = ?", (lead_id,)).fetchone()
+                    prev = run(f"SELECT status FROM {self.leads} WHERE id = ? AND workspace = ?",
+                               (lead_id, self.ws)).fetchone()
                     if changes["status"] == "contacted" and prev and prev["status"] != "contacted":
                         changes["contacted_at"] = _now()
                     elif changes["status"] == "new":
                         changes["contacted_at"] = ""
                 sets = ", ".join(f"{k} = ?" for k in changes)
-                run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ?",
-                    [*changes.values(), _now(), lead_id])
+                run(f"UPDATE {self.leads} SET {sets}, updated_at = ? WHERE id = ? AND workspace = ?",
+                    [*changes.values(), _now(), lead_id, self.ws])
         return self.get_lead(lead_id)
 
     @staticmethod
@@ -385,7 +412,7 @@ class Store:
         """Note that an email went out; a New lead becomes Contacted."""
         with self._tx() as run:
             run(f"UPDATE {self.leads} SET email_sent_at = ?, emails_sent = emails_sent + 1, "
-                f"updated_at = ? WHERE id = ?", (_now(), _now(), lead_id))
+                f"updated_at = ? WHERE id = ? AND workspace = ?", (_now(), _now(), lead_id, self.ws))
         lead = self.get_lead(lead_id)
         if lead and lead["status"] == "new":
             lead = self.update_lead(lead_id, {"status": "contacted"})
@@ -396,17 +423,19 @@ class Store:
         with self._tx() as run:
             # Counts leads emailed in the window; a resend within 24h counts once (good enough
             # for a safety cap, and never lets a burst through).
-            r = run(f"SELECT COUNT(*) AS n FROM {self.leads} WHERE email_sent_at >= ?", (since,)).fetchone()
+            r = run(f"SELECT COUNT(*) AS n FROM {self.leads} WHERE email_sent_at >= ? AND workspace = ?",
+                    (since, self.ws)).fetchone()
         return int(r["n"] or 0)
 
     def delete_lead(self, lead_id: int) -> None:
         with self._tx() as run:
-            run(f"DELETE FROM {self.leads} WHERE id = ?", (lead_id,))
+            run(f"DELETE FROM {self.leads} WHERE id = ? AND workspace = ?", (lead_id, self.ws))
 
     def stats(self) -> dict:
         with self._tx() as run:
             by_status = {r["status"]: r["n"] for r in run(
-                f"SELECT status, COUNT(*) AS n FROM {self.leads} GROUP BY status").fetchall()}
+                f"SELECT status, COUNT(*) AS n FROM {self.leads} WHERE workspace = ? GROUP BY status",
+                (self.ws,)).fetchall()}
             t = run(f"""
                 SELECT COUNT(*) AS total,
                        SUM(CASE WHEN has_website = 1 THEN 1 ELSE 0 END) AS with_site,
@@ -414,13 +443,13 @@ class Store:
                        SUM(CASE WHEN tier = 'A' THEN 1 ELSE 0 END) AS tier_a,
                        SUM(CASE WHEN status = 'contacted' AND contacted_at != ''
                                  AND contacted_at < ? THEN 1 ELSE 0 END) AS follow_ups
-                FROM {self.leads}""", (self._follow_up_cutoff(),)).fetchone()
+                FROM {self.leads} WHERE workspace = ?""", (self._follow_up_cutoff(), self.ws)).fetchone()
             angles = run(f"""
                 SELECT angle, COUNT(*) AS sent,
                        SUM(CASE WHEN status IN ('replied', 'meeting', 'won') THEN 1 ELSE 0 END) AS replies
                 FROM {self.leads}
-                WHERE status NOT IN ('new', 'skip') AND angle != ''
-                GROUP BY angle ORDER BY sent DESC""").fetchall()
+                WHERE workspace = ? AND status NOT IN ('new', 'skip') AND angle != ''
+                GROUP BY angle ORDER BY sent DESC""", (self.ws,)).fetchall()
         return {
             "total": int(t["total"] or 0), "with_website": int(t["with_site"] or 0),
             "no_website": int(t["no_site"] or 0), "tier_a": int(t["tier_a"] or 0),
@@ -448,13 +477,15 @@ class Store:
         job_id = secrets.token_hex(8)
         now = _now()
         with self._tx() as run:
-            run(f"INSERT INTO {self.jobs} (id, status, stage, request, created_at, updated_at) "
-                f"VALUES (?, 'queued', 'Starting', ?, ?, ?)", (job_id, json.dumps(request), now, now))
+            run(f"INSERT INTO {self.jobs} (id, workspace, status, stage, request, created_at, updated_at) "
+                f"VALUES (?, ?, 'queued', 'Starting', ?, ?, ?)",
+                (job_id, self.ws, json.dumps(request), now, now))
         return self.get_job(job_id)
 
     def get_job(self, job_id: str, internal: bool = False) -> dict | None:
         with self._tx() as run:
-            r = run(f"SELECT * FROM {self.jobs} WHERE id = ?", (job_id,)).fetchone()
+            r = run(f"SELECT * FROM {self.jobs} WHERE id = ? AND workspace = ?",
+                    (job_id, self.ws)).fetchone()
         if not r:
             return None
         d = dict(r)
@@ -470,28 +501,32 @@ class Store:
         fields["updated_at"] = _now()
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self._tx() as run:
-            run(f"UPDATE {self.jobs} SET {sets} WHERE id = ?", [*fields.values(), job_id])
+            run(f"UPDATE {self.jobs} SET {sets} WHERE id = ? AND workspace = ?",
+                [*fields.values(), job_id, self.ws])
 
     def claim_job(self, job_id: str, seconds: int) -> bool:
         """Take a short lease so two browser tabs can't process the same job at once."""
         now = datetime.now(timezone.utc)
         until = (now + timedelta(seconds=seconds)).isoformat(timespec="seconds")
         with self._tx() as run:
-            cur = run(f"UPDATE {self.jobs} SET lease_until = ? WHERE id = ? "
+            cur = run(f"UPDATE {self.jobs} SET lease_until = ? WHERE id = ? AND workspace = ? "
                       f"AND (lease_until = '' OR lease_until < ?)",
-                      (until, job_id, now.isoformat(timespec="seconds")))
+                      (until, job_id, self.ws, now.isoformat(timespec="seconds")))
             return cur.rowcount == 1
 
     def release_job(self, job_id: str) -> None:
         with self._tx() as run:
-            run(f"UPDATE {self.jobs} SET lease_until = '' WHERE id = ?", (job_id,))
+            run(f"UPDATE {self.jobs} SET lease_until = '' WHERE id = ? AND workspace = ?",
+                (job_id, self.ws))
 
     # --- settings ----------------------------------------------------------
 
     def get_settings(self) -> dict:
         with self._tx() as run:
-            stored = {r["key"]: r["value"] for r in
-                      run(f"SELECT key, value FROM {self.settings_t}").fetchall()}
+            prefix = self.ws + ":"
+            stored = {r["key"][len(prefix):]: r["value"] for r in
+                      run(f"SELECT key, value FROM {self.settings_t} WHERE substr(key, 1, ?) = ?",
+                          (len(prefix), prefix)).fetchall()}
         env = {
             "sender_name": os.environ.get("HALA_SENDER_NAME", ""),
             "sender_company": os.environ.get("HALA_SENDER_COMPANY", ""),
@@ -527,7 +562,26 @@ class Store:
             for k, v in values.items():
                 if k in SETTING_KEYS and v is not None:
                     run(f"INSERT INTO {self.settings_t} (key, value) VALUES (?, ?) "
-                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (k, str(v)))
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (f"{self.ws}:{k}", str(v)))
+
+    def adopt_default_workspace(self, owner: str) -> None:
+        """Move data created before workspaces existed ('default') to the owner's account.
+        Runs once per process; cheap when there's nothing to move."""
+        owner = owner.strip().lower()
+        if not owner or owner == DEFAULT_WORKSPACE or owner in self._shared["adopted"]:
+            return
+        d = DEFAULT_WORKSPACE
+        with self._tx() as run:
+            run(f"UPDATE {self.leads} SET workspace = ?, key = ? || substr(key, ?) WHERE workspace = ?",
+                (owner, owner, len(d) + 1, d))
+            run(f"UPDATE {self.jobs} SET workspace = ? WHERE workspace = ?", (owner, d))
+            for r in run(f"SELECT key, value FROM {self.settings_t} WHERE substr(key, 1, ?) = ?",
+                         (len(d) + 1, d + ":")).fetchall():
+                run(f"INSERT INTO {self.settings_t} (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                    (owner + r["key"][len(d):], r["value"]))
+            run(f"DELETE FROM {self.settings_t} WHERE substr(key, 1, ?) = ?", (len(d) + 1, d + ":"))
+        self._shared["adopted"].add(owner)
 
     def sender(self) -> dict:
         s = self.get_settings()

@@ -52,6 +52,17 @@ can't read them. Only the server's database connection can.
    under **Settings → Git**.
 4. Open your Vercel URL and log in with the user from step 1.4.
 
+## Accounts and workspaces
+
+Each email in `HALA_ALLOWED_EMAILS` gets its **own private workspace**: its own
+leads, searches, settings, API keys and Gmail sending. Accounts can't see each
+other's data. Data created before workspaces existed belongs to the **first**
+email in the list.
+
+API keys set as Vercel environment variables (e.g. `GEMINI_API_KEY`) are a
+fallback for **every** account. For separate businesses, have each account
+paste its own keys in Settings instead.
+
 ## How it behaves online
 
 - **Report links in emails** point at `https://<your-domain>/reports/<random-id>`.

@@ -98,7 +98,9 @@ export default function SettingsPage() {
       <header className="page-head">
         <div>
           <h1>Settings</h1>
-          <p className="muted">Saved in your Hala database. Keys are never shown again after saving.</p>
+          <p className="muted">
+            These settings belong to your account only. Each account has its own leads, settings and keys.
+          </p>
         </div>
       </header>
 

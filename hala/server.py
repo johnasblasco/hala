@@ -88,6 +88,14 @@ def auth_config() -> dict | None:
     return None
 
 
+def owner_email() -> str | None:
+    """First email in HALA_ALLOWED_EMAILS: inherits data created before workspaces existed."""
+    for e in os.environ.get("HALA_ALLOWED_EMAILS", "").split(","):
+        if e.strip():
+            return e.strip().lower()
+    return None
+
+
 def allowed_emails() -> set[str]:
     raw = os.environ.get("HALA_ALLOWED_EMAILS", "")
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
@@ -371,6 +379,13 @@ def create_app(store: Store | None = None, local_base: str | None = None,
     app = FastAPI(title="Hala")
     app.state.store = store
     api = APIRouter(prefix="/api", dependencies=[Depends(require_user)])
+    base_store = store
+
+    def ws_store(user: str | None = Depends(require_user)) -> Store:
+        """Each account works in its own workspace (leads, settings, searches)."""
+        if user and user == owner_email():
+            base_store.adopt_default_workspace(user)
+        return base_store.scoped(user)
 
     @app.exception_handler(DatabaseUnavailable)
     def db_unavailable(_request: Request, exc: DatabaseUnavailable):
@@ -404,7 +419,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return {"email": user}
 
     @api.get("/settings")
-    def get_settings():
+    def get_settings(store: Store = Depends(ws_store)):
         s = store.get_settings()
         # Never send secrets back to the browser; only whether they are set.
         for k in SECRET_KEYS:
@@ -418,7 +433,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return s
 
     @api.put("/settings")
-    def put_settings(patch: SettingsPatch):
+    def put_settings(patch: SettingsPatch, store: Store = Depends(ws_store)):
         values = {k: v.strip() if isinstance(v, str) else v
                   for k, v in patch.model_dump(exclude_none=True).items()}
         pw = values.get("smtp_password")
@@ -440,10 +455,10 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             if values.get(k) == "":
                 values.pop(k)  # blank secret field = keep the existing value
         store.save_settings(values)
-        return get_settings()
+        return get_settings(store)
 
     @api.get("/settings/models")
-    def ai_models():
+    def ai_models(store: Store = Depends(ws_store)):
         """Models the chosen provider says this key can use, and which one 'Automatic' picks."""
         settings = store.get_settings()
         endpoint = ai.provider_endpoint(settings)
@@ -459,7 +474,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return {"models": usable, "automatic": auto, "error": None}
 
     @api.post("/settings/test-ai")
-    def test_ai():
+    def test_ai(store: Store = Depends(ws_store)):
         """Send a tiny request with the current AI settings and report what happened."""
         settings = store.get_settings()
         if settings.get("use_ai") != "1":
@@ -473,7 +488,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
                 "model": getattr(writer, "model", "")}
 
     @api.post("/settings/test-email")
-    def test_email():
+    def test_email(store: Store = Depends(ws_store)):
         """Send a test email to your own address."""
         settings = store.get_settings()
         cfg = mailer.mail_config(settings)
@@ -488,25 +503,25 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return {"ok": True, "message": f"Sent a test email to {cfg['user']}. Check your inbox."}
 
     @api.delete("/settings/{key}")
-    def clear_secret(key: str):
+    def clear_secret(key: str, store: Store = Depends(ws_store)):
         if key not in SECRET_KEYS:
             raise HTTPException(400, "only API keys can be cleared")
         store.save_settings({key: ""})
-        return get_settings()
+        return get_settings(store)
 
     @api.post("/search")
-    def start_search(req: SearchRequest):
+    def start_search(req: SearchRequest, store: Store = Depends(ws_store)):
         return store.create_job(req.model_dump())
 
     @api.post("/jobs/{job_id}/step")
-    def advance_job(job_id: str):
+    def advance_job(job_id: str, store: Store = Depends(ws_store)):
         job = step_job(store, job_id, local_base)
         if not job:
             raise HTTPException(404, "search not found")
         return job
 
     @api.post("/jobs/{job_id}/cancel")
-    def cancel_job(job_id: str):
+    def cancel_job(job_id: str, store: Store = Depends(ws_store)):
         job = store.get_job(job_id)
         if not job:
             raise HTTPException(404, "search not found")
@@ -516,7 +531,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return store.get_job(job_id)
 
     @api.get("/jobs/{job_id}")
-    def get_job(job_id: str):
+    def get_job(job_id: str, store: Store = Depends(ws_store)):
         expire_if_stale(store, store.get_job(job_id, internal=True))
         job = store.get_job(job_id)
         if not job:
@@ -524,17 +539,17 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return job
 
     @api.post("/audit")
-    def audit_one(req: AuditRequest):
+    def audit_one(req: AuditRequest, store: Store = Depends(ws_store)):
         r = audit(req.url.strip())
         return {**r.to_dict(), "findings": [asdict(f) for f in r.findings]}
 
     @api.get("/leads")
-    def list_leads(kind: str | None = None, status: str | None = None, q: str | None = None):
+    def list_leads(kind: str | None = None, status: str | None = None, q: str | None = None, store: Store = Depends(ws_store)):
         has = {"site": True, "nosite": False}.get(kind or "")
         return store.list_leads(has, status or None, q or None)
 
     @api.get("/leads.csv")
-    def export_csv(kind: str | None = None):
+    def export_csv(kind: str | None = None, store: Store = Depends(ws_store)):
         has = {"site": True, "nosite": False}.get(kind or "")
         rows = store.list_leads(has)
         cols = ["status", "tier", "qual_score", "name", "email", "phone", "website", "category",
@@ -548,14 +563,14 @@ def create_app(store: Store | None = None, local_base: str | None = None,
                         headers={"Content-Disposition": "attachment; filename=hala-leads.csv"})
 
     @api.get("/leads/{lead_id}")
-    def get_lead(lead_id: int):
+    def get_lead(lead_id: int, store: Store = Depends(ws_store)):
         lead = store.get_lead(lead_id)
         if not lead:
             raise HTTPException(404, "lead not found")
         return lead
 
     @api.patch("/leads/{lead_id}")
-    def patch_lead(lead_id: int, patch: LeadPatch):
+    def patch_lead(lead_id: int, patch: LeadPatch, store: Store = Depends(ws_store)):
         try:
             lead = store.update_lead(lead_id, patch.model_dump(exclude_none=True))
         except ValueError as e:
@@ -565,12 +580,12 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return lead
 
     @api.delete("/leads/{lead_id}")
-    def delete_lead(lead_id: int):
+    def delete_lead(lead_id: int, store: Store = Depends(ws_store)):
         store.delete_lead(lead_id)
         return {"ok": True}
 
     @api.post("/leads/{lead_id}/refresh")
-    def refresh_lead(lead_id: int):
+    def refresh_lead(lead_id: int, store: Store = Depends(ws_store)):
         """Re-audit the site and rewrite the pitch (resets an edited pitch)."""
         lead = store.get_lead(lead_id)
         if not lead:
@@ -582,7 +597,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return store.get_lead(lead_id)
 
     @api.post("/leads/{lead_id}/send-email")
-    def send_lead_email(lead_id: int):
+    def send_lead_email(lead_id: int, store: Store = Depends(ws_store)):
         """Send this lead's saved email from your mailbox, within the daily limit."""
         lead = store.get_lead(lead_id)
         if not lead:
@@ -605,7 +620,7 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return store.record_email_sent(lead_id)
 
     @api.post("/leads/{lead_id}/preview")
-    def make_preview(lead_id: int, req: PreviewRequest):
+    def make_preview(lead_id: int, req: PreviewRequest, store: Store = Depends(ws_store)):
         """Build (or rebuild) a one-page website preview to send to this business."""
         lead = store.get_lead(lead_id)
         if not lead:
@@ -620,11 +635,11 @@ def create_app(store: Store | None = None, local_base: str | None = None,
         return {**lead, "preview_url": f"{local_base}/preview/{lead['preview_token']}"}
 
     @api.get("/stats")
-    def stats():
+    def stats(store: Store = Depends(ws_store)):
         return {**store.stats(), "statuses": list(STATUSES)}
 
     @api.get("/reports.zip")
-    def reports_zip():
+    def reports_zip(store: Store = Depends(ws_store)):
         """All reports, named to match the links in the emails (for external hosting)."""
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
