@@ -73,6 +73,7 @@ LEAD_COLUMNS = [
 ]
 
 JOB_COLUMNS = [
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),  # steps started but not finished (cut off)
     ("status", "TEXT NOT NULL DEFAULT 'queued'"),   # queued | running | done | error
     ("stage", "TEXT NOT NULL DEFAULT ''"),
     ("done", "INTEGER NOT NULL DEFAULT 0"),
@@ -86,7 +87,8 @@ JOB_COLUMNS = [
     ("created_at", "TEXT NOT NULL DEFAULT ''"),
     ("updated_at", "TEXT NOT NULL DEFAULT ''"),
 ]
-PUBLIC_JOB_FIELDS = ("id", "status", "stage", "done", "total", "error", "with_website", "no_website")
+PUBLIC_JOB_FIELDS = ("id", "status", "stage", "done", "total", "error", "with_website", "no_website",
+                     "updated_at")
 
 # Fields refreshed by a new search or re-audit. Status, notes and anything the
 # user has worked on are never overwritten.

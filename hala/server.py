@@ -25,6 +25,7 @@ import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -45,6 +46,11 @@ from .report import render_report, slugify
 STATIC_DIR = Path(__file__).parent / "static"
 STEP_BATCH = 4          # websites audited per step request
 STEP_LEASE_SECONDS = 290
+# Vercel stops a function after ~300s; keep the search well inside that so it ends
+# with a clear message instead of being cut off mid-way.
+SEARCH_BUDGET_SECONDS = 200
+MAX_STEP_ATTEMPTS = 2        # a step cut off this many times in a row fails the search
+STALE_SECONDS = 600          # no progress for this long: the search is dead
 
 
 def public_base_url(default: str = "http://localhost:8000") -> str:
@@ -272,7 +278,8 @@ def _search_stage(store: Store, job: dict) -> None:
         search = finder.google_search(settings["google_api_key"])
         store.update_job(job["id"], stage="Searching Google Maps")
     else:
-        search = finder.osm_search(notify=lambda m: store.update_job(job["id"], stage=m))
+        search = finder.osm_search(notify=lambda m: store.update_job(job["id"], stage=m),
+                                   budget_seconds=SEARCH_BUDGET_SECONDS)
     queries = list(dict.fromkeys(q.strip() for q in req.get("queries", []) if q.strip()))
     if not queries:
         raise RuntimeError("Enter at least one search.")
@@ -311,20 +318,44 @@ def _audit_stage(store: Store, job: dict, local_base: str) -> None:
                      stage="Auditing websites" if rest else "Done")
 
 
+def expire_if_stale(store: Store, job: dict | None) -> None:
+    """Fail a search that has made no progress for a long time (e.g. its request was cut off)."""
+    if not job or job["status"] not in ("queued", "running"):
+        return
+    try:
+        updated = datetime.fromisoformat(job["updated_at"])
+    except (TypeError, ValueError):
+        return
+    lease = job.get("lease_until") or ""
+    now = datetime.now(timezone.utc)
+    if (now - updated).total_seconds() > STALE_SECONDS and (not lease or lease < now.isoformat()):
+        store.update_job(job["id"], status="error", stage="Failed", pending=[],
+                         error="This search stopped responding. Start a new search, with fewer "
+                               "towns if it happens again.")
+
+
 def step_job(store: Store, job_id: str, local_base: str) -> dict | None:
     """Advance a search job by one step. Safe to call repeatedly and concurrently."""
+    expire_if_stale(store, store.get_job(job_id, internal=True))
     job = store.get_job(job_id, internal=True)
     if job is None or job["status"] in ("done", "error"):
         return store.get_job(job_id)
     if not store.claim_job(job_id, STEP_LEASE_SECONDS):
         return store.get_job(job_id)  # another request is already working on it
     try:
+        # A step that never finished (its request was cut off) leaves attempts > 0.
+        attempts = job["attempts"] + 1
+        if attempts > MAX_STEP_ATTEMPTS:
+            raise RuntimeError("The search kept timing out. OpenStreetMap may be slow right now. "
+                               "Try again later with fewer towns.")
+        store.update_job(job_id, attempts=attempts)
         if job["status"] == "queued":
             _search_stage(store, job)
         else:
             _audit_stage(store, job, local_base)
+        store.update_job(job_id, attempts=0)
     except Exception as e:  # surfaced to the UI
-        store.update_job(job_id, status="error", error=str(e), stage="Failed")
+        store.update_job(job_id, status="error", error=str(e), stage="Failed", pending=[])
     finally:
         store.release_job(job_id)
     return store.get_job(job_id)
@@ -474,8 +505,19 @@ def create_app(store: Store | None = None, local_base: str | None = None,
             raise HTTPException(404, "search not found")
         return job
 
+    @api.post("/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        job = store.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "search not found")
+        if job["status"] in ("queued", "running"):
+            store.update_job(job_id, status="error", stage="Cancelled", error="Search cancelled.",
+                             pending=[])
+        return store.get_job(job_id)
+
     @api.get("/jobs/{job_id}")
     def get_job(job_id: str):
+        expire_if_stale(store, store.get_job(job_id, internal=True))
         job = store.get_job(job_id)
         if not job:
             raise HTTPException(404, "search not found")

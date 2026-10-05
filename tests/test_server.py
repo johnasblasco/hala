@@ -415,3 +415,30 @@ def test_send_email_reports_mail_errors(client, store, monkeypatch):
     r = client.post(f"/api/leads/{lead_id}/send-email")
     assert r.status_code == 502 and "rejected the login" in r.json()["detail"]
     assert client.get(f"/api/leads/{lead_id}").json()["status"] == "new"  # not marked when it failed
+
+
+def test_cut_off_search_fails_instead_of_looping(client, store, monkeypatch):
+    fake_search(monkeypatch)
+    job = client.post("/api/search", json={"queries": ["dentist in Malolos"]}).json()
+    # simulate two requests that were killed mid-search (attempts left > 0, lease expired)
+    store.update_job(job["id"], attempts=2)
+    out = client.post(f"/api/jobs/{job['id']}/step").json()
+    assert out["status"] == "error" and "kept timing out" in out["error"]
+
+
+def test_stale_search_is_expired(client, store):
+    job = client.post("/api/search", json={"queries": ["dentist in X"]}).json()
+    with store._tx() as run:
+        run(f"UPDATE {store.jobs} SET updated_at = '2020-01-01T00:00:00+00:00', status = 'running' WHERE id = ?",
+            (job["id"],))
+    out = client.get(f"/api/jobs/{job['id']}").json()
+    assert out["status"] == "error" and "stopped responding" in out["error"]
+
+
+def test_cancel_search(client, monkeypatch):
+    fake_search(monkeypatch)
+    job = client.post("/api/search", json={"queries": ["dentist in Malolos"]}).json()
+    out = client.post(f"/api/jobs/{job['id']}/cancel").json()
+    assert out["status"] == "error" and out["stage"] == "Cancelled"
+    assert client.post(f"/api/jobs/{job['id']}/step").json()["status"] == "error"  # stays cancelled
+    assert out["updated_at"]

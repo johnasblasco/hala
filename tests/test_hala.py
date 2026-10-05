@@ -300,3 +300,34 @@ def test_osm_batch_makes_one_query_for_many_towns():
     with_site, no_site = finder.find_leads(["dentist in Malolos", "dentist in Calumpit"], search)
     assert len(queries) == 1
     assert {l["name"]: l["city"] for l in no_site} == {"A Dental": "Malolos", "B Dental": "Calumpit"}
+
+
+def test_overpass_respects_time_budget():
+    import io
+    import urllib.error
+    import pytest
+    from hala import find as finder
+    clock = {"t": 0.0}
+
+    def fake_open(req, timeout=0):
+        clock["t"] += timeout  # each attempt uses its whole timeout
+        raise TimeoutError("timed out")
+    with pytest.raises(finder.SearchTimeout, match="too slow"):
+        finder._overpass("q", _open=fake_open, deadline=200, _clock=lambda: clock["t"], _sleep=lambda s: None)
+    assert clock["t"] <= 200  # never runs past the budget
+
+
+def test_overpass_skips_waiting_when_out_of_time():
+    import io
+    import urllib.error
+    from hala import find as finder
+    slept, tried = [], []
+
+    def fake_open(req, timeout=0):
+        tried.append(req.full_url)
+        if len(tried) == 1:
+            raise urllib.error.HTTPError(req.full_url, 429, "busy", {}, io.BytesIO(b""))
+        return io.BytesIO(b'{"elements": []}')
+    # only 25s left: don't sleep 15s on a busy server, move to the next one
+    out = finder._overpass("q", _open=fake_open, deadline=25, _clock=lambda: 0, _sleep=slept.append)
+    assert out == {"elements": []} and slept == [] and tried[1] == finder.OVERPASS_URLS[1]

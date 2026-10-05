@@ -39,6 +39,7 @@ export const api = {
   search: (queries: string[], source: string) =>
     request<Job>("/api/search", { method: "POST", body: json({ queries, source }) }),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
+  cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   stepJob: (id: string) => request<Job>(`/api/jobs/${id}/step`, { method: "POST" }),
   leads: (params: { kind?: string; status?: string; q?: string }) => {
     const qs = new URLSearchParams(

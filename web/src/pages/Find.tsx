@@ -43,9 +43,14 @@ export default function Find() {
       api
         .job(saved)
         .then((j) => {
-          setJob(j);
-          if (j.status === "queued" || j.status === "running") drive(j.id);
-          else clearActiveJob();
+          // Only pick up a search that is still alive and recent; otherwise forget it.
+          const recent = j.updated_at && Date.now() - new Date(j.updated_at).getTime() < 10 * 60_000;
+          if ((j.status === "queued" || j.status === "running") && recent) {
+            setJob(j);
+            drive(j.id);
+          } else {
+            clearActiveJob();
+          }
         })
         .catch(clearActiveJob);
     }
@@ -119,6 +124,17 @@ export default function Find() {
 
   const allShownChecked = shown.length > 0 && shown.every((c) => cities.includes(c));
   const running = job?.status === "running" || job?.status === "queued";
+
+  async function cancel() {
+    if (!job) return;
+    looping.current = null; // stop driving it
+    clearActiveJob();
+    try {
+      setJob(await api.cancelJob(job.id));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
 
   async function start(e: React.FormEvent) {
     e.preventDefault();
@@ -257,18 +273,29 @@ export default function Find() {
 
       {job && (
         <section className="card">
-          <h2>{job.status === "done" ? "Done" : job.status === "error" ? "Something went wrong" : job.stage}</h2>
+          <h2>{job.status === "done"
+              ? "Done"
+              : job.stage === "Cancelled"
+                ? "Search cancelled"
+                : job.status === "error"
+                  ? "Something went wrong"
+                  : job.stage}</h2>
           {running && (
             <>
               <div className="progress">
                 <div className="progress-bar" style={{ width: `${job.total ? pct : 8}%` }} />
               </div>
-              <p className="muted small">
-                {job.total ? `Audited ${job.done} of ${job.total} websites` : "This can take a minute…"}
-              </p>
+              <div className="row-between">
+                <p className="muted small">
+                  {job.total ? `Audited ${job.done} of ${job.total} websites` : "This can take a minute or two…"}
+                </p>
+                <button type="button" className="btn btn-small" onClick={cancel}>
+                  Cancel search
+                </button>
+              </div>
             </>
           )}
-          {job.status === "error" && <ErrorBox error={job.error} />}
+          {job.status === "error" && job.stage !== "Cancelled" && <ErrorBox error={job.error} />}
           {job.status === "done" && (
             <div className="result-row">
               <div className="stat">

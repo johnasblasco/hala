@@ -216,18 +216,36 @@ def _get_json(url: str, params: dict) -> object:
         return json.loads(resp.read())
 
 
-def _overpass(query: str, _open=None, _sleep=time.sleep, notify=None) -> dict:
-    """Run an Overpass query. Waits and retries when a server is busy, then tries the next one."""
+class SearchTimeout(RuntimeError):
+    """The search ran out of its time budget (servers too slow or busy)."""
+
+
+def _overpass(query: str, _open=None, _sleep=time.sleep, notify=None, deadline: float | None = None,
+              _clock=time.monotonic) -> dict:
+    """Run an Overpass query. Waits and retries when a server is busy, then tries the next one.
+
+    `deadline` (a _clock() value) caps the total time, so a hosted request (Vercel stops
+    functions after a few minutes) ends with a clear error instead of being cut off.
+    """
     open_url = _open or urllib.request.urlopen
     body = urllib.parse.urlencode({"data": query}).encode()
     errors = []
+
+    def remaining() -> float:
+        return float("inf") if deadline is None else deadline - _clock()
+
     for url in OVERPASS_URLS:
         host = urlparse(url).netloc
         for attempt in range(3):
+            if remaining() < 10:
+                raise SearchTimeout(
+                    "OpenStreetMap's free servers are too slow right now, so the search was "
+                    "stopped. Wait a few minutes and try again with fewer towns, or add a "
+                    "Google API key. (Details: " + ("; ".join(errors) or "no answer in time") + ")")
             req = urllib.request.Request(url, data=body, headers={
                 **OSM_HEADERS, "Content-Type": "application/x-www-form-urlencoded"})
             try:
-                with open_url(req, timeout=150) as resp:
+                with open_url(req, timeout=min(150, max(5, remaining() - 5))) as resp:
                     return json.loads(resp.read())
             except urllib.error.HTTPError as e:
                 if e.code in RETRY_STATUSES and attempt < 2:
@@ -236,6 +254,9 @@ def _overpass(query: str, _open=None, _sleep=time.sleep, notify=None) -> dict:
                     except ValueError:
                         wait = 0
                     wait = min(max(wait, 15 * (attempt + 1)), 60)
+                    if remaining() - wait < 20:
+                        errors.append(f"{host}: HTTP {e.code} (busy)")
+                        break  # not enough time to wait; try the next server
                     if notify:
                         notify(f"OpenStreetMap is busy, retrying in {wait}s")
                     _sleep(wait)
@@ -287,17 +308,27 @@ def element_to_lead(el: dict, city: str) -> dict:
     }
 
 
-def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep):
+def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep,
+               budget_seconds: float | None = None, _clock=time.monotonic):
     """Return an OSM search function. Its `.batch` runs many places as ONE Overpass query,
-    which avoids the public servers' rate limits."""
-    run_query = _overpass_fn or (lambda q: _overpass(q, notify=notify))
+    which avoids the public servers' rate limits. `budget_seconds` caps the whole search."""
     geocode = _geocode or geocode_bbox
 
     def batch(queries: list[str], max_per_query: int) -> list[dict]:
+        deadline = _clock() + budget_seconds if budget_seconds else None
+
+        def run_query(q: str) -> dict:
+            if _overpass_fn:
+                return _overpass_fn(q)
+            return _overpass(q, notify=notify, deadline=deadline, _sleep=_sleep, _clock=_clock)
+
         places = []  # (place name, bbox)
         parts = []
         for i, query in enumerate(queries):
             kind, place = split_query(query)
+            if deadline is not None and deadline - _clock() < 60:
+                raise SearchTimeout(f"Looking up {len(queries)} towns took too long. "
+                                    "Try fewer towns at a time.")
             if notify:
                 notify(f"Looking up {place}")
             if i:

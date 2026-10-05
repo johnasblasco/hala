@@ -69,6 +69,7 @@ export interface Job {
   error: string | null;
   with_website: number;
   no_website: number;
+  updated_at: string;
 }
 
 export interface Stats {
