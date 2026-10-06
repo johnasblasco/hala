@@ -80,6 +80,7 @@ def ai_pitch(lead: dict, audit: AuditResult, report_url: str, writer: Writer) ->
         "business": lead.get("name"),
         "category": lead.get("category"),
         "city": lead.get("city"),
+        "country": lead.get("country") or None,
         "contact_name": lead.get("contact_name"),
         "language": lead.get("language") or "English",
         "report_url": report_url,

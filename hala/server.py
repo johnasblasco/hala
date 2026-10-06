@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -160,6 +161,7 @@ class SearchRequest(BaseModel):
     queries: list[str]
     source: str = "auto"      # auto | osm | google
     max_per_query: int = 60
+    country: str = "PH"       # ISO 3166 code; narrows town lookups to that country
 
 
 class AuditRequest(BaseModel):
@@ -205,6 +207,7 @@ class SettingsPatch(BaseModel):
     smtp_host: str | None = None
     smtp_port: str | None = None
     daily_send_limit: str | None = None
+    home_country: str | None = None
 
 
 # Catches browser-autofilled passwords without betting on key prefixes (providers
@@ -283,11 +286,12 @@ def _search_stage(store: Store, job: dict) -> None:
     if source == "google":
         if not settings["google_api_key"]:
             raise RuntimeError("Add a Google API key in Settings, or use OpenStreetMap.")
-        search = finder.google_search(settings["google_api_key"])
+        search = finder.google_search(settings["google_api_key"], country=req.get("country", ""))
         store.update_job(job["id"], stage="Searching Google Maps")
     else:
         search = finder.osm_search(notify=lambda m: store.update_job(job["id"], stage=m),
-                                   budget_seconds=SEARCH_BUDGET_SECONDS)
+                                   budget_seconds=SEARCH_BUDGET_SECONDS,
+                                   country=req.get("country", ""))
     queries = list(dict.fromkeys(q.strip() for q in req.get("queries", []) if q.strip()))
     if not queries:
         raise RuntimeError("Enter at least one search.")
@@ -296,11 +300,13 @@ def _search_stage(store: Store, job: dict) -> None:
                                            lookup_emails=False)
     label = ", ".join(queries)
     sender = store.sender()
+    country = (req.get("country") or "").upper()
     for lead in no_site:
+        lead["country"] = country
         store.upsert_lead({**lead, "has_website": 0, "search_query": label,
                            "facebook_search": finder.facebook_search_url(lead),
                            "message": no_website_message(lead, sender)})
-    pending = [{**l, "search_query": label} for l in with_site]
+    pending = [{**l, "search_query": label, "country": country} for l in with_site]
     store.update_job(job["id"], status="running" if pending else "done",
                      stage="Auditing websites" if pending else "Done",
                      total=len(pending), with_website=len(with_site),
@@ -449,6 +455,10 @@ def create_app(store: Store | None = None, local_base: str | None = None,
                 raise HTTPException(400, f"That doesn't look like a {label}: keys are long (30+ "
                                          "characters) with no spaces. Did your browser autofill a "
                                          "saved password? Copy the key again from the provider.")
+        if "home_country" in values:
+            if not re.fullmatch(r"[A-Za-z]{2}", values["home_country"]):
+                raise HTTPException(400, "Home country must be a 2-letter country code, like PH or US.")
+            values["home_country"] = values["home_country"].upper()
         if "ai_provider" in values and values["ai_provider"] not in ai.PROVIDERS:
             raise HTTPException(400, "unknown AI provider")
         for k in SECRET_KEYS:

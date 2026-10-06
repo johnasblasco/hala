@@ -89,13 +89,16 @@ LEAD_FIELDS = ["name", "email", "website", "category", "city", "reviews", "ratin
                "runs_ads", "phone", "address", "maps_url"]
 
 
-def search_places(query: str, api_key: str, max_results: int = 60, _post=None) -> list[dict]:
+def search_places(query: str, api_key: str, max_results: int = 60, _post=None,
+                  country: str = "") -> list[dict]:
     """Text-search Google Places. Returns up to max_results raw place dicts (API max is 60)."""
     post = _post or _post_json
     places: list[dict] = []
     token = None
     while len(places) < max_results:
         body = {"textQuery": query, "pageSize": min(20, max_results - len(places))}
+        if re.fullmatch(r"[A-Za-z]{2}", country or ""):
+            body["regionCode"] = country.upper()  # bias results to that country
         if token:
             body["pageToken"] = token
         data = post(PLACES_URL, body, {"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK})
@@ -182,9 +185,9 @@ def place_to_lead(place: dict) -> dict:
     }
 
 
-def google_search(api_key: str):
+def google_search(api_key: str, country: str = ""):
     def search(query: str, max_results: int) -> list[dict]:
-        return [place_to_lead(p) for p in search_places(query, api_key, max_results)]
+        return [place_to_lead(p) for p in search_places(query, api_key, max_results, country=country)]
     return search
 
 
@@ -269,11 +272,15 @@ def _overpass(query: str, _open=None, _sleep=time.sleep, notify=None, deadline: 
                        "try again, or add a Google API key. (Details: " + "; ".join(errors) + ")")
 
 
-def geocode_bbox(place: str, _get=None) -> tuple[float, float, float, float]:
-    """Return (south, west, north, east) for a place name via Nominatim."""
+def geocode_bbox(place: str, _get=None, country: str = "") -> tuple[float, float, float, float]:
+    """Return (south, west, north, east) for a place name via Nominatim.
+    `country` (ISO code like 'PH', 'US') keeps same-named towns elsewhere out."""
     get = _get or _get_json
+    params = {"q": place, "format": "json", "limit": 1}
+    if re.fullmatch(r"[A-Za-z]{2}", country or ""):
+        params["countrycodes"] = country.lower()
     try:
-        results = get(NOMINATIM_URL, {"q": place, "format": "json", "limit": 1})
+        results = get(NOMINATIM_URL, params)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"couldn't look up {place!r}: {e}") from e
     if not results:
@@ -308,11 +315,11 @@ def element_to_lead(el: dict, city: str) -> dict:
     }
 
 
-def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep,
+def osm_search(_overpass_fn=None, _geocode=None, notify=None, _sleep=time.sleep, country: str = "",
                budget_seconds: float | None = None, _clock=time.monotonic):
     """Return an OSM search function. Its `.batch` runs many places as ONE Overpass query,
     which avoids the public servers' rate limits. `budget_seconds` caps the whole search."""
-    geocode = _geocode or geocode_bbox
+    geocode = _geocode or (lambda place: geocode_bbox(place, country=country))
 
     def batch(queries: list[str], max_per_query: int) -> list[dict]:
         deadline = _clock() + budget_seconds if budget_seconds else None

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
+import { LANGUAGES } from "../data/countries";
 import type { Lead } from "../types";
 import { CopyButton, ErrorBox } from "./ui";
 
@@ -93,9 +94,9 @@ export default function PreviewSection({
       <label>
         <span>Language</span>
         <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-          <option>English</option>
-          <option>Filipino</option>
-          <option>Taglish</option>
+          {LANGUAGES.map((l) => (
+            <option key={l}>{l}</option>
+          ))}
         </select>
       </label>
       <div className="actions">

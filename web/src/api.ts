@@ -36,8 +36,8 @@ const json = (body: unknown) => JSON.stringify(body);
 
 export const api = {
   stats: () => request<Stats>("/api/stats"),
-  search: (queries: string[], source: string) =>
-    request<Job>("/api/search", { method: "POST", body: json({ queries, source }) }),
+  search: (queries: string[], source: string, country: string) =>
+    request<Job>("/api/search", { method: "POST", body: json({ queries, source, country }) }),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   stepJob: (id: string) => request<Job>(`/api/jobs/${id}/step`, { method: "POST" }),

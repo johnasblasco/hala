@@ -513,3 +513,36 @@ def test_legacy_unprefixed_keys_are_migrated(store):
     # upserting the same business again doesn't duplicate it
     store.upsert_lead({"key": "old|1", "name": "Old"})
     assert len(store.list_leads()) == 1
+
+
+def test_country_is_used_for_search_and_saved_on_leads(client, store, monkeypatch):
+    seen = {}
+
+    def fake_osm(**kw):
+        seen["country"] = kw.get("country")
+        return lambda q, m: [{"name": "Austin Dental", "email": "", "website": "", "category": "dentist",
+                              "city": "Austin", "phone": "", "address": "1 Main St", "maps_url": ""}]
+    monkeypatch.setattr(finder, "osm_search", fake_osm)
+    job = client.post("/api/search", json={"queries": ["dentist in Austin, Texas, United States"],
+                                           "country": "us"}).json()
+    while job["status"] not in ("done", "error"):
+        job = client.post(f"/api/jobs/{job['id']}/step").json()
+    assert seen["country"] == "us"
+    assert client.get("/api/leads").json()[0]["country"] == "US"
+    assert client.get("/api/settings").json()["home_country"] == "PH"  # default stays local
+    assert client.put("/api/settings", json={"home_country": "us"}).json()["home_country"] == "US"
+    assert client.put("/api/settings", json={"home_country": "USA!"}).status_code == 400
+
+
+def test_geocode_limits_to_country():
+    from hala.find import geocode_bbox
+    sent = {}
+
+    def fake_get(url, params):
+        sent.update(params)
+        return [{"boundingbox": ["1", "2", "3", "4"]}]
+    geocode_bbox("Springfield, Illinois", _get=fake_get, country="US")
+    assert sent["countrycodes"] == "us"
+    sent.clear()
+    geocode_bbox("Somewhere", _get=fake_get, country="")
+    assert "countrycodes" not in sent

@@ -40,6 +40,7 @@ LEAD_COLUMNS = [
     ("phone", "TEXT NOT NULL DEFAULT ''"),
     ("category", "TEXT NOT NULL DEFAULT ''"),
     ("city", "TEXT NOT NULL DEFAULT ''"),
+    ("country", "TEXT NOT NULL DEFAULT ''"),  # ISO code from the search, e.g. PH, US
     ("address", "TEXT NOT NULL DEFAULT ''"),
     ("maps_url", "TEXT NOT NULL DEFAULT ''"),
     ("facebook_search", "TEXT NOT NULL DEFAULT ''"),
@@ -95,7 +96,7 @@ PUBLIC_JOB_FIELDS = ("id", "status", "stage", "done", "total", "error", "with_we
 
 # Fields refreshed by a new search or re-audit. Status, notes and anything the
 # user has worked on are never overwritten.
-DATA_FIELDS = ("name", "email", "website", "phone", "category", "city", "address", "maps_url",
+DATA_FIELDS = ("name", "email", "website", "phone", "category", "city", "country", "address", "maps_url",
                "facebook_search", "reviews", "rating", "has_website", "reachable", "site_score",
                "tier", "qual_score", "reasons", "top_issue", "findings", "report_html",
                "search_query")
@@ -107,7 +108,8 @@ AI_KEY_SETTINGS = ("anthropic_api_key", "gemini_api_key", "groq_api_key", "openr
 SETTING_KEYS = ("sender_name", "sender_company", "sender_email", "sender_address",
                 "report_base_url", "google_api_key", "use_ai", "ai_provider", "ai_model",
                 "ai_base_url", *AI_KEY_SETTINGS,
-                "smtp_user", "smtp_password", "smtp_host", "smtp_port", "daily_send_limit")
+                "smtp_user", "smtp_password", "smtp_host", "smtp_port", "daily_send_limit",
+                "home_country")
 SECRET_KEYS = ("google_api_key", *AI_KEY_SETTINGS, "smtp_password")
 
 
@@ -548,6 +550,7 @@ class Store:
             "smtp_host": os.environ.get("HALA_SMTP_HOST", ""),
             "smtp_port": os.environ.get("HALA_SMTP_PORT", ""),
             "daily_send_limit": os.environ.get("HALA_DAILY_SEND_LIMIT", ""),
+            "home_country": os.environ.get("HALA_HOME_COUNTRY", "PH"),
             "use_ai": "1",
         }
         out = {k: stored.get(k) or env.get(k, "") for k in SETTING_KEYS}

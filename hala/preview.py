@@ -15,7 +15,9 @@ from urllib.parse import quote_plus, urlparse
 
 from .ai import AnthropicWriter, Writer
 
-LANGUAGES = ("English", "Filipino", "Taglish")
+LANGUAGES = ("English", "Filipino", "Taglish", "Spanish", "Portuguese", "French", "German", "Italian",
+             "Dutch", "Indonesian", "Malay", "Vietnamese", "Thai", "Japanese", "Korean",
+             "Chinese (Simplified)", "Arabic", "Hindi")
 
 # Business type -> (accent, accent-dark, soft background)
 THEMES = {
@@ -133,7 +135,7 @@ CONTENT_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM = """You write the text for a one-page website preview for a small local business in the Philippines. A web designer will show it to the owner as "here's what your site could look like".
+SYSTEM = """You write the text for a one-page website preview for a small local business (its country is given in `country`). A web designer will show it to the owner as "here's what your site could look like".
 
 Rules:
 - Use ONLY facts given to you. Never invent prices, years in business, awards, certifications, staff or doctor names, testimonials, statistics or promotions. If you don't know something, write around it.
@@ -142,7 +144,8 @@ Rules:
 - 4 to 6 services, each with a one-sentence description. 3 short "why choose us" points that don't make unverifiable claims (e.g. "Easy to reach in <town>", "Book by call or message").
 - about: 2 to 3 warm sentences. faq: 3 practical questions (booking, location, payment or what to bring) with answers that don't invent facts; when unsure, say to call or message.
 - cta: a short button label like "Book an appointment".
-- Write in the language given in `language` (Taglish = natural Filipino-English mix)."""
+- Write in the language given in `language` (Taglish = natural Filipino-English mix).
+- Match the business's country: local spelling, currency words and phrasing; never assume the Philippines unless the address says so."""
 
 
 # Rotated so cards don't repeat; deliberately claim nothing specific.
@@ -193,6 +196,7 @@ def ai_content(lead: dict, notes: str, language: str, writer: Writer) -> dict | 
         "business_name": lead.get("name"),
         "type": lead.get("category") or kind,
         "town": lead.get("city"),
+        "country": lead.get("country") or None,
         "address": lead.get("address"),
         "google_rating": lead.get("rating") or None,
         "review_count": lead.get("reviews") or None,

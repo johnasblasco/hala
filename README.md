@@ -16,7 +16,7 @@ hala serve
 
 Your browser opens at http://localhost:8000. From there you can:
 
-- **Find leads**: pick a business type and towns, then click *Find leads*. Hala searches, finds emails, audits websites and writes the outreach.
+- **Find leads**: pick a business type, a country (the Philippines by default, with province and town checkboxes; any other country by typing cities) and towns, then click *Find leads*. Hala searches, finds emails, audits websites and writes the outreach.
 - **Leads**: work through them best-first. Open one to see its audit, edit and copy the email (or open it straight in Gmail), and track its status: New → Contacted → Replied → Meeting → Won/Lost.
 - **Dashboard**: shows your pipeline and which pitch angles get replies.
 - **Quick audit**: check any single website.

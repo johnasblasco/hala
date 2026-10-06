@@ -166,7 +166,7 @@ def test_find_command_splits_no_website(tmp_path, monkeypatch):
          "nationalPhoneNumber": "0917 000 0000"},
     ]
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "KEY")
-    monkeypatch.setattr(finder, "search_places", lambda q, k, m: places)
+    monkeypatch.setattr(finder, "search_places", lambda q, k, m, **kw: places)
     monkeypatch.setattr(finder, "find_email", lambda url: "info@bs.ph")
     out = tmp_path / "leads.csv"
     assert main(["find", "dentist in QC", "--out", str(out)]) == 0

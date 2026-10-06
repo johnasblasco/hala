@@ -2,13 +2,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { go } from "../App";
 import { ErrorBox } from "../components/ui";
+import { COUNTRIES, countryName } from "../data/countries";
 import PH from "../data/ph-locations.json";
 import type { Job, Settings } from "../types";
 
 const PROVINCES = PH as { province: string; cities: string[] }[];
 const SAVED_KEY = "hala.find.location";
 
-function loadSaved(): { province: string; cities: string[] } {
+interface SavedLocation {
+  country?: string;
+  province: string;
+  cities: string[];
+  region?: string;
+  intlCities?: string;
+}
+
+function loadSaved(): SavedLocation {
   try {
     const v = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "");
     if (v && typeof v.province === "string" && Array.isArray(v.cities)) return v;
@@ -22,9 +31,13 @@ const TYPES = ["dentist", "clinic", "salon", "spa", "resort", "restaurant", "gym
 
 export default function Find() {
   const [kind, setKind] = useState("dentist");
-  const saved = useMemo(loadSaved, []);
-  const [province, setProvince] = useState(saved.province);
-  const [cities, setCities] = useState<string[]>(saved.cities);
+  const savedLoc = useMemo(loadSaved, []);
+  // Country: last used, else your home country from Settings (Philippines by default).
+  const [country, setCountry] = useState<string>(savedLoc.country ?? "PH");
+  const [region, setRegion] = useState(savedLoc.region ?? "");
+  const [intlCities, setIntlCities] = useState(savedLoc.intlCities ?? "");
+  const [province, setProvince] = useState(savedLoc.province);
+  const [cities, setCities] = useState<string[]>(savedLoc.cities);
   const [filter, setFilter] = useState("");
   const [extra, setExtra] = useState("");
   const [source, setSource] = useState("auto");
@@ -36,7 +49,13 @@ export default function Find() {
 
   useEffect(() => {
     alive.current = true;
-    api.settings().then(setSettings).catch(() => undefined);
+    api
+      .settings()
+      .then((s) => {
+        setSettings(s);
+        if (!savedLoc.country && s.home_country) setCountry(s.home_country);
+      })
+      .catch(() => undefined);
     // Pick up a search that was still running when you left this page.
     const saved = readActiveJob();
     if (saved) {
@@ -99,18 +118,22 @@ export default function Find() {
   const provinceCities = PROVINCES.find((p) => p.province === province)?.cities ?? [];
   const shown = provinceCities.filter((c) => c.toLowerCase().includes(filter.toLowerCase()));
   const extraPlaces = extra.split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
+  const isPH = country === "PH";
+  const where = (place: string) =>
+    isPH ? `${place}, ${province}, Philippines` : [place, region.trim(), countryName(country)].filter(Boolean).join(", ");
+  const typedCities = intlCities.split(/[,\n]/).map((c) => c.trim()).filter(Boolean);
   const queries = [
-    ...cities.map((c) => `${kind.trim()} in ${c}, ${province}, Philippines`),
-    ...extraPlaces.map((p) => `${kind.trim()} in ${p}`),
+    ...(isPH ? cities : typedCities).map((c) => `${kind.trim()} in ${where(c)}`),
+    ...extraPlaces.map((p) => `${kind.trim()} in ${isPH ? p : where(p)}`),
   ];
 
   useEffect(() => {
     try {
-      localStorage.setItem(SAVED_KEY, JSON.stringify({ province, cities }));
+      localStorage.setItem(SAVED_KEY, JSON.stringify({ country, province, cities, region, intlCities }));
     } catch {
       /* storage unavailable */
     }
-  }, [province, cities]);
+  }, [country, province, cities, region, intlCities]);
 
   function pickProvince(p: string) {
     setProvince(p);
@@ -140,7 +163,7 @@ export default function Find() {
     e.preventDefault();
     setError(null);
     try {
-      const j = await api.search(queries, source);
+      const j = await api.search(queries, source, country);
       setJob(j);
       saveActiveJob(j.id);
       drive(j.id);
@@ -175,6 +198,52 @@ export default function Find() {
           ))}
         </div>
 
+        <label>
+          <span>Country</span>
+          <select value={country} onChange={(e) => setCountry(e.target.value)}>
+            {COUNTRIES.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.name}
+                {c.code === settings?.home_country ? " (home)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {!isPH && (
+          <>
+            <p className="alert alert-warn small" style={{ margin: 0 }}>
+              Cold outreach rules vary by country. Canada (CASL) and much of the EU require more than the US or the
+              Philippines. Check {countryName(country)}'s rules before emailing businesses there.
+            </p>
+            <label>
+              <span>
+                State / province / region <span className="muted">(optional)</span>
+              </span>
+              <input
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                placeholder="e.g. Texas, Ontario, New South Wales"
+              />
+            </label>
+            <label>
+              <span>Cities or towns</span>
+              <textarea
+                rows={2}
+                value={intlCities}
+                onChange={(e) => setIntlCities(e.target.value)}
+                placeholder="e.g. Austin, Round Rock, Georgetown"
+              />
+              <small className="muted">
+                Separate with commas. Neighborhoods work too (e.g. "Shoreditch" in London). Smaller areas give better
+                results than whole states.
+              </small>
+            </label>
+          </>
+        )}
+
+        {isPH && (
+        <>
         <label>
           <span>Province</span>
           <select value={province} onChange={(e) => pickProvince(e.target.value)}>
@@ -225,6 +294,8 @@ export default function Find() {
             </small>
           )}
         </fieldset>
+        </>
+        )}
 
         <label>
           <span>
@@ -233,7 +304,7 @@ export default function Find() {
           <input
             value={extra}
             onChange={(e) => setExtra(e.target.value)}
-            placeholder="e.g. a barangay or area: Cubao, BGC, Lolomboy"
+            placeholder={isPH ? "e.g. a barangay or area: Cubao, BGC, Lolomboy" : "e.g. a neighborhood or district"}
           />
         </label>
 

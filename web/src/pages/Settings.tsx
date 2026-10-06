@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { COUNTRIES } from "../data/countries";
 import { ErrorBox } from "../components/ui";
 import type { Settings } from "../types";
 
@@ -43,6 +44,7 @@ export default function SettingsPage() {
       smtp_host: s.smtp_host,
       smtp_port: s.smtp_port,
       daily_send_limit: s.daily_send_limit,
+      home_country: s.home_country,
       ...Object.fromEntries(s.ai_providers.map((p) => [`${p.id}_api_key`, ""])),
     });
   }
@@ -121,6 +123,21 @@ export default function SettingsPage() {
             {"hint" in f && <small className="muted">{f.hint}</small>}
           </label>
         ))}
+
+        <label>
+          <span>Home country</span>
+          <select
+            value={form.home_country ?? "PH"}
+            onChange={(e) => setForm({ ...form, home_country: e.target.value })}
+          >
+            {COUNTRIES.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <small className="muted">Find leads opens on this country. You can still search any country there.</small>
+        </label>
 
         <h2>Email sending (optional)</h2>
         <p className="muted small" style={{ marginTop: -8 }}>

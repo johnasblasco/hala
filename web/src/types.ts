@@ -28,6 +28,7 @@ export interface Lead {
   phone: string;
   category: string;
   city: string;
+  country: string;
   address: string;
   maps_url: string;
   facebook_search: string;
@@ -106,6 +107,7 @@ export interface Settings {
   daily_send_limit: string;
   email_sending: { configured: boolean; limit: number; sent_last_24h: number };
   smtp_password_set: boolean;
+  home_country: string;
   google_api_key_set: boolean;
   [key: `${string}_api_key_set`]: boolean;
 }
